@@ -126,8 +126,8 @@ headerbar, headerbar windowhandle, headerbar box {
 }
 
 .session-meta {
-  font-size: 13px;
-  color: #9893a5;
+  font-size: 14px;
+  color: #575279;
 }
 
 .chip {
@@ -227,7 +227,7 @@ headerbar, headerbar windowhandle, headerbar box {
 }
 
 .transcript-thinking {
-  color: #9893a5;
+  color: #797593;
   font-size: 13px;
   font-style: italic;
 }
@@ -257,7 +257,7 @@ headerbar, headerbar windowhandle, headerbar box {
 }
 
 .plan-task.abandoned {
-  color: #9893a5;
+  color: #797593;
 }
 
 .plan-task.blocked {
@@ -314,7 +314,7 @@ entry:focus {
 }
 
 .login-sub {
-  color: #9893a5;
+  color: #797593;
   font-size: 14px;
 }
 
@@ -332,7 +332,7 @@ entry:focus {
 }
 
 .muted {
-  color: #9893a5;
+  color: #797593;
 }
 
 scrolledwindow {
