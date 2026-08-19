@@ -1,7 +1,10 @@
+use std::collections::HashMap;
+
 use cascade_core::{
     CloudClient, CloudCommand, OmpSession, SessionEvent, SessionManager, SessionMeta,
     SessionRegistry, SessionSnapshot, SpawnOptions, UiAnswer,
 };
+use cascade_relay::{CollabAttach, GuestCommand};
 use tokio::sync::mpsc;
 use tokio::task::AbortHandle;
 
@@ -11,6 +14,7 @@ use crate::settings::Settings;
 pub enum BackendKind {
     Local,
     Cloud,
+    Terminal,
 }
 
 pub enum SessionBackend {
@@ -19,6 +23,10 @@ pub enum SessionBackend {
         session_id: String,
         cmd: mpsc::UnboundedSender<CloudCommand>,
     },
+    Terminal {
+        session_id: String,
+        cmd: mpsc::Sender<GuestCommand>,
+    },
 }
 
 impl SessionBackend {
@@ -26,6 +34,7 @@ impl SessionBackend {
         match self {
             Self::Local(_) => BackendKind::Local,
             Self::Cloud { .. } => BackendKind::Cloud,
+            Self::Terminal { .. } => BackendKind::Terminal,
         }
     }
 
@@ -33,6 +42,7 @@ impl SessionBackend {
         match self {
             Self::Local(s) => s.id().to_string(),
             Self::Cloud { session_id, .. } => session_id.clone(),
+            Self::Terminal { session_id, .. } => session_id.clone(),
         }
     }
 
@@ -43,6 +53,12 @@ impl SessionBackend {
                 cmd.send(CloudCommand::Prompt { message })?;
                 Ok(())
             }
+            Self::Terminal { cmd, .. } => {
+                cmd.send(GuestCommand::Prompt { text: message })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("terminal prompt: {e}"))?;
+                Ok(())
+            }
         }
     }
 
@@ -51,6 +67,12 @@ impl SessionBackend {
             Self::Local(s) => s.abort().await,
             Self::Cloud { cmd, .. } => {
                 cmd.send(CloudCommand::Abort)?;
+                Ok(())
+            }
+            Self::Terminal { cmd, .. } => {
+                cmd.send(GuestCommand::Abort)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("terminal abort: {e}"))?;
                 Ok(())
             }
         }
@@ -66,6 +88,7 @@ impl SessionBackend {
                 })?;
                 Ok(())
             }
+            Self::Terminal { .. } => Ok(()),
         }
     }
 }
@@ -86,9 +109,13 @@ pub enum Cmd {
     OpenSession {
         id: String,
         kind: BackendKind,
+        join_handle: Option<String>,
     },
     Prompt(String),
     Abort,
+    /// Resolve the Nth session of `kind` from the merged sorted list and open it
+    /// (CASCADE_AUTOTEST hook; resolved through the normal OpenSession path).
+    AutotestOpen { kind: BackendKind, index: usize },
     Answer {
         request_id: String,
         response: UiAnswer,
@@ -115,7 +142,11 @@ pub enum UiMsg {
     LoggedOut,
 }
 
-pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::Sender<UiMsg>) {
+pub async fn worker(
+    cmd_rx: async_channel::Receiver<Cmd>,
+    ui_tx: async_channel::Sender<UiMsg>,
+    cmd_tx: async_channel::Sender<Cmd>,
+) {
     let mut settings = Settings::load();
     let _ = std::fs::create_dir_all(Settings::config_dir());
     let registry = match SessionRegistry::open(&Settings::registry_path()) {
@@ -131,6 +162,7 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
     let mut cloud: Option<CloudClient> = None;
     let mut current: Option<SessionBackend> = None;
     let mut pump: Option<AbortHandle> = None;
+    let mut terminal_links: HashMap<String, String> = HashMap::new();
 
     if let Some(token) = settings.token.clone() {
         match CloudClient::connect(&settings.cloud_url, &token).await {
@@ -141,7 +173,7 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                         url: settings.cloud_url.clone(),
                     })
                     .await;
-                push_sessions(&manager, cloud.as_ref(), &ui_tx).await;
+                push_sessions(&manager, cloud.as_ref(), &mut terminal_links, &ui_tx).await;
             }
             Err(e) => {
                 settings.token = None;
@@ -154,9 +186,7 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
             }
         }
     } else {
-        let _ = ui_tx
-            .send(UiMsg::NeedLogin { error: None })
-            .await;
+        let _ = ui_tx.send(UiMsg::NeedLogin { error: None }).await;
     }
 
     while let Ok(cmd) = cmd_rx.recv().await {
@@ -174,7 +204,13 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                                         url: settings.cloud_url.clone(),
                                     })
                                     .await;
-                                push_sessions(&manager, cloud.as_ref(), &ui_tx).await;
+                                push_sessions(
+                                    &manager,
+                                    cloud.as_ref(),
+                                    &mut terminal_links,
+                                    &ui_tx,
+                                )
+                                .await;
                             }
                             Err(e) => {
                                 let _ = ui_tx
@@ -200,6 +236,7 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                 }
                 current = None;
                 cloud = None;
+                terminal_links.clear();
                 settings.token = None;
                 let _ = settings.save();
                 let _ = ui_tx.send(UiMsg::LoggedOut).await;
@@ -209,15 +246,23 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                 let _ = settings.save();
             }
             Cmd::RefreshSessions => {
-                push_sessions(&manager, cloud.as_ref(), &ui_tx).await;
+                push_sessions(&manager, cloud.as_ref(), &mut terminal_links, &ui_tx).await;
             }
             Cmd::NewSession { kind, cwd, model } => {
                 settings.last_backend = match kind {
                     BackendKind::Local => "local".into(),
-                    BackendKind::Cloud => "cloud".into(),
+                    BackendKind::Cloud | BackendKind::Terminal => "cloud".into(),
                 };
                 let _ = settings.save();
                 match kind {
+                    BackendKind::Terminal => {
+                        let _ = ui_tx
+                            .send(UiMsg::Error(
+                                "terminal sessions are attached from the list, not created here"
+                                    .into(),
+                            ))
+                            .await;
+                    }
                     BackendKind::Local => {
                         let opts = SpawnOptions {
                             cwd: std::path::PathBuf::from(&cwd),
@@ -227,14 +272,14 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                         match manager.spawn(opts).await {
                             Ok(id) => {
                                 if let Some(sess) = manager.get(&id).await {
-                                    attach_local(
-                                        sess,
-                                        &mut current,
-                                        &mut pump,
+                                    attach_local(sess, &mut current, &mut pump, &ui_tx).await;
+                                    push_sessions(
+                                        &manager,
+                                        cloud.as_ref(),
+                                        &mut terminal_links,
                                         &ui_tx,
                                     )
                                     .await;
-                                    push_sessions(&manager, cloud.as_ref(), &ui_tx).await;
                                 }
                             }
                             Err(e) => {
@@ -251,10 +296,7 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                                 .await;
                             continue;
                         };
-                        match client
-                            .create_session(None, &cwd, model)
-                            .await
-                        {
+                        match client.create_session(None, &cwd, model).await {
                             Ok(id) => match client.attach(&id).await {
                                 Ok((ev_rx, cmd_tx)) => {
                                     if let Some(h) = pump.take() {
@@ -272,7 +314,13 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                                             snapshot: None,
                                         })
                                         .await;
-                                    push_sessions(&manager, cloud.as_ref(), &ui_tx).await;
+                                    push_sessions(
+                                        &manager,
+                                        cloud.as_ref(),
+                                        &mut terminal_links,
+                                        &ui_tx,
+                                    )
+                                    .await;
                                 }
                                 Err(e) => {
                                     let _ = ui_tx
@@ -289,7 +337,53 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                     }
                 }
             }
-            Cmd::OpenSession { id, kind } => match kind {
+            Cmd::AutotestOpen { kind, index } => {
+                // Same merge + sort as push_sessions.
+                let mut list = manager.list().await;
+                if let Some(c) = cloud.as_ref() {
+                    if let Ok(mut remote) = c.list_sessions().await {
+                        list.append(&mut remote);
+                    }
+                }
+                list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+                let filtered: Vec<_> = list
+                    .into_iter()
+                    .filter(|m| match kind {
+                        BackendKind::Terminal => m.kind == "terminal",
+                        BackendKind::Cloud => {
+                            m.kind != "terminal" && (m.machine == "cloud" || m.machine.is_empty())
+                        }
+                        BackendKind::Local => {
+                            m.kind != "terminal" && !(m.machine == "cloud" || m.machine.is_empty())
+                        }
+                    })
+                    .collect();
+                match filtered.get(index) {
+                    Some(meta) => {
+                        let id = meta.id.clone();
+                        let jh = terminal_links.get(&id).cloned();
+                        let _ = cmd_tx
+                            .send(Cmd::OpenSession {
+                                id,
+                                kind,
+                                join_handle: jh,
+                            })
+                            .await;
+                    }
+                    None => {
+                        let _ = ui_tx
+                            .send(UiMsg::Error(format!(
+                                "autotest: no {kind:?} session at index {index}"
+                            )))
+                            .await;
+                    }
+                }
+            }
+            Cmd::OpenSession {
+                id,
+                kind,
+                join_handle,
+            } => match kind {
                 BackendKind::Local => {
                     if let Some(sess) = manager.get(&id).await {
                         attach_local(sess, &mut current, &mut pump, &ui_tx).await;
@@ -326,6 +420,43 @@ pub async fn worker(cmd_rx: async_channel::Receiver<Cmd>, ui_tx: async_channel::
                         }
                         Err(e) => {
                             let _ = ui_tx.send(UiMsg::Error(format!("attach: {e:#}"))).await;
+                        }
+                    }
+                }
+                BackendKind::Terminal => {
+                    let link = join_handle
+                        .or_else(|| terminal_links.get(&id).cloned())
+                        .filter(|s| !s.is_empty());
+                    let Some(link) = link else {
+                        let _ = ui_tx
+                            .send(UiMsg::Error(format!(
+                                "terminal session {id} has no join handle"
+                            )))
+                            .await;
+                        continue;
+                    };
+                    match CollabAttach::connect(&link).await {
+                        Ok((ev_rx, cmd_tx)) => {
+                            if let Some(h) = pump.take() {
+                                h.abort();
+                            }
+                            current = Some(SessionBackend::Terminal {
+                                session_id: id.clone(),
+                                cmd: cmd_tx,
+                            });
+                            pump = Some(spawn_broadcast_pump(ev_rx, ui_tx.clone()));
+                            let _ = ui_tx
+                                .send(UiMsg::Attached {
+                                    id,
+                                    kind: BackendKind::Terminal,
+                                    snapshot: None,
+                                })
+                                .await;
+                        }
+                        Err(e) => {
+                            let _ = ui_tx
+                                .send(UiMsg::Error(format!("collab attach: {e:#}")))
+                                .await;
                         }
                     }
                 }
@@ -440,12 +571,23 @@ fn spawn_mpsc_pump(
 async fn push_sessions(
     manager: &SessionManager,
     cloud: Option<&CloudClient>,
+    terminal_links: &mut HashMap<String, String>,
     ui_tx: &async_channel::Sender<UiMsg>,
 ) {
     let mut list = manager.list().await;
+    terminal_links.clear();
     if let Some(c) = cloud {
         match c.list_sessions().await {
-            Ok(mut remote) => list.append(&mut remote),
+            Ok(mut remote) => {
+                for m in &remote {
+                    if m.kind == "terminal" {
+                        if let Some(h) = &m.join_handle {
+                            terminal_links.insert(m.id.clone(), h.clone());
+                        }
+                    }
+                }
+                list.append(&mut remote);
+            }
             Err(e) => {
                 let _ = ui_tx
                     .send(UiMsg::Error(format!("list cloud sessions: {e:#}")))

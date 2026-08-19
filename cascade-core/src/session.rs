@@ -78,6 +78,8 @@ pub enum SessionEvent {
     SessionInfo { title: String, session_id: String },
     StateChanged,
     ProcessExited { code: Option<i32> },
+    /// Full transcript/plan snapshot, sent by cascaded on WS attach.
+    Snapshot(SessionSnapshot),
     Raw(Value),
 }
 
@@ -679,6 +681,10 @@ impl SessionManager {
             machine: local_machine(),
             created_at: now,
             last_active: now,
+            kind: "managed".into(),
+            join_handle: None,
+            view_handle: None,
+            pid: None,
         };
         if let Ok(state) = session.get_state().await {
             meta.omp_session_id = if state.session_id.is_empty() {

@@ -5,6 +5,7 @@ edition = "2021"
 
 [dependencies]
 cascade-core = { path = "../cascade-core" }
+cascade-relay = { path = "../cascade-relay" }
 gtk4 = { version = "0.9", features = ["v4_10"] }
 tokio = { version = "1", features = ["full"] }
 serde = { version = "1", features = ["derive"] }

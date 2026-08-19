@@ -139,6 +139,17 @@ headerbar, headerbar windowhandle, headerbar box {
   font-weight: 500;
 }
 
+.chip-gold {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.5px;
+  text-transform: uppercase;
+  padding: 2px 8px;
+  border: 1px solid #ea9d34;
+  background-color: rgba(234, 157, 52, 0.15);
+  color: #ea9d34;
+}
+
 .cta-pine {
   background-color: #286983;
   color: #faf4ed;

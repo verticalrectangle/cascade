@@ -351,7 +351,7 @@ async function unregisterTerminal(
 ): Promise<void> {
 	const url = `${cascadeUrl.replace(/\/+$/, "")}/register-terminal`;
 	try {
-		const result = await httpJson(url, "DELETE", token, { session_id: sessionId });
+		const result = await httpJson(url, "DELETE", token, { session_id: sessionId, pid: process.pid });
 		if (!result.ok) {
 			log.warn("cascade-omp-plugin: unregister-terminal failed", { status: result.status });
 		}
@@ -501,7 +501,7 @@ export default function (pi: ExtensionAPI): void {
 			await next.connect();
 			if (shuttingDown || host !== next) return;
 
-			const sessionId = ctx.sessionManager.getSessionId();
+			const sessionId = ctx.sessionManager.getSessionId() || `pid-${process.pid}-${Date.now()}`;
 			registeredSessionId = sessionId;
 			await registerTerminal(
 				cascadeUrl,

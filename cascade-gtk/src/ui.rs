@@ -55,6 +55,7 @@ pub struct Ui {
     cmd: async_channel::Sender<Cmd>,
     stream: StreamState,
     selected_id: Option<String>,
+    attached_kind: Option<BackendKind>,
     metas: Vec<SessionMeta>,
 }
 
@@ -119,6 +120,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
             pending_ui: None,
         },
         selected_id: None,
+        attached_kind: None,
         metas: Vec::new(),
     }));
 
@@ -206,12 +208,24 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         ui,
         move |_, row| {
             let id = row.widget_name().to_string();
-            let kind = if row.has_css_class("kind-cloud") {
+            let kind = if row.has_css_class("kind-terminal") {
+                BackendKind::Terminal
+            } else if row.has_css_class("kind-cloud") {
                 BackendKind::Cloud
             } else {
                 BackendKind::Local
             };
-            let _ = ui.borrow().cmd.try_send(Cmd::OpenSession { id, kind });
+            let join_handle = ui
+                .borrow()
+                .metas
+                .iter()
+                .find(|m| m.id == id)
+                .and_then(|m| m.join_handle.clone());
+            let _ = ui.borrow().cmd.try_send(Cmd::OpenSession {
+                id,
+                kind,
+                join_handle,
+            });
         }
     ));
 
@@ -534,9 +548,11 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                 u.stream.tools.clear();
                 u.stream.pending_ui = None;
                 u.abort_btn.set_visible(false);
+                u.attached_kind = Some(kind);
                 match kind {
                     BackendKind::Local => u.machine.set_text("local"),
                     BackendKind::Cloud => u.machine.set_text("cloud"),
+                    BackendKind::Terminal => u.machine.set_text("terminal"),
                 }
                 clear_box(&u.transcript);
                 clear_box(&u.question_host);
@@ -575,7 +591,10 @@ fn render_sessions(ui: &Rc<RefCell<Ui>>, list: Vec<SessionMeta>) {
         let row = ListBoxRow::new();
         row.set_widget_name(&meta.id);
         row.add_css_class("session-card");
-        if meta.machine == "cloud" || meta.machine.is_empty() {
+        let is_terminal = meta.kind == "terminal";
+        if is_terminal {
+            row.add_css_class("kind-terminal");
+        } else if meta.machine == "cloud" || meta.machine.is_empty() {
             row.add_css_class("kind-cloud");
         } else {
             row.add_css_class("kind-local");
@@ -588,18 +607,31 @@ fn render_sessions(ui: &Rc<RefCell<Ui>>, list: Vec<SessionMeta>) {
             .name
             .clone()
             .unwrap_or_else(|| meta.id.chars().take(8).collect::<String>());
+        let title_row = GtkBox::new(Orientation::Horizontal, 8);
         let t = Label::new(Some(&title));
         t.add_css_class("session-title");
         t.set_xalign(0.0);
+        t.set_hexpand(true);
+        title_row.append(&t);
+        if is_terminal {
+            let chip = Label::new(Some("terminal"));
+            chip.add_css_class("chip-gold");
+            title_row.append(&chip);
+        }
         let sub = Label::new(Some(&meta.cwd));
         sub.add_css_class("session-subtitle");
         sub.set_xalign(0.0);
         sub.set_ellipsize(pango::EllipsizeMode::Middle);
-        let when = meta.last_active.format("%Y-%m-%d %H:%M").to_string();
-        let meta_l = Label::new(Some(&format!("{} · {}", meta.machine, when)));
+        let meta_text = if is_terminal {
+            format!("{} · {}", meta.machine, meta.cwd)
+        } else {
+            let when = meta.last_active.format("%Y-%m-%d %H:%M").to_string();
+            format!("{} · {}", meta.machine, when)
+        };
+        let meta_l = Label::new(Some(&meta_text));
         meta_l.add_css_class("session-meta");
         meta_l.set_xalign(0.0);
-        col.append(&t);
+        col.append(&title_row);
         col.append(&sub);
         col.append(&meta_l);
         row.set_child(Some(&col));
@@ -661,7 +693,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         }
         SessionEvent::TextDelta { delta, .. } => {
             let label = {
-                let mut u = ui.borrow_mut();
+                let u = ui.borrow_mut();
                 if u.stream.assistant.is_none() {
                     drop(u);
                     let l = append_assistant_label(ui);
@@ -678,7 +710,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         }
         SessionEvent::ThinkingDelta { delta, .. } => {
             let label = {
-                let mut u = ui.borrow_mut();
+                let u = ui.borrow_mut();
                 if let Some(l) = u.stream.thinking.clone() {
                     l
                 } else {
@@ -770,8 +802,14 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             ui.borrow().abort_btn.set_visible(false);
             ui.borrow_mut().stream.assistant = None;
         }
-        SessionEvent::TodoChanged { phases } => render_plan(ui, &phases),
-        SessionEvent::UiRequest(req) => show_ui_request(ui, req),
+        SessionEvent::TodoChanged { phases } => { tracing::info!(phases = phases.len(), "TodoChanged received"); render_plan(ui, &phases); },
+        SessionEvent::UiRequest(req) => {
+            if ui.borrow().attached_kind == Some(BackendKind::Terminal) {
+                show_toast(ui, "answer on the host terminal");
+            } else {
+                show_ui_request(ui, req);
+            }
+        }
         SessionEvent::UiRequestCancelled { target_id } => {
             let pending = ui.borrow().stream.pending_ui.clone();
             if pending.as_deref() == Some(target_id.as_str()) {
@@ -792,7 +830,8 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             {
                 meta.name = Some(title);
             }
-            render_sessions(ui, ui.borrow().metas.clone());
+            let metas = ui.borrow().metas.clone();
+            render_sessions(ui, metas);
         }
         SessionEvent::StateChanged => {
             let _ = ui.borrow().cmd.try_send(Cmd::RefreshState);
@@ -806,6 +845,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     code.map(|c| format!(" ({c})")).unwrap_or_default()
                 ),
             );
+        }
+        SessionEvent::Snapshot(snap) => {
+            apply_snapshot(ui, snap);
         }
         SessionEvent::Raw(v) => {
             tracing::debug!(raw = %v, "unmapped session event");

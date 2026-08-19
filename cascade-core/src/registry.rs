@@ -22,6 +22,15 @@ pub struct SessionMeta {
     pub machine: String,
     pub created_at: DateTime<Utc>,
     pub last_active: DateTime<Utc>,
+    /// `"managed"` (default) or `"terminal"` (live collab room).
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
 }
 
 impl SessionRegistry {
@@ -127,6 +136,10 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         machine: row.get(5)?,
         created_at: parse_ts(&row.get::<_, String>(6)?),
         last_active: parse_ts(&row.get::<_, String>(7)?),
+        kind: String::new(),
+        join_handle: None,
+        view_handle: None,
+        pid: None,
     })
 }
 

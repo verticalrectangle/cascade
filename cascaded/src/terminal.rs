@@ -53,7 +53,10 @@ pub struct RegisterTerminalRequest {
 
 #[derive(Debug, Deserialize)]
 pub struct UnregisterTerminalRequest {
+    #[serde(default)]
     pub session_id: String,
+    #[serde(default)]
+    pub pid: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -87,6 +90,13 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
 fn upsert(db: &Path, row: &RegisterTerminalRequest) -> anyhow::Result<()> {
     let conn = Connection::open(db)?;
     let now = Utc::now().to_rfc3339();
+    // omp's session id can be empty at session_start; fall back to a pid key so
+    // the PRIMARY KEY stays unique and the row remains deletable.
+    let session_id = if row.session_id.is_empty() {
+        format!("pid-{}", row.pid.unwrap_or(0))
+    } else {
+        row.session_id.clone()
+    };
     conn.execute(
         "INSERT INTO terminal_sessions
             (session_id, machine, join_handle, view_handle, cwd, title, pid, created_at)
@@ -99,7 +109,7 @@ fn upsert(db: &Path, row: &RegisterTerminalRequest) -> anyhow::Result<()> {
             title = excluded.title,
             pid = excluded.pid",
         rusqlite::params![
-            row.session_id,
+            session_id,
             row.machine,
             row.join_handle,
             row.view_handle,
@@ -112,11 +122,11 @@ fn upsert(db: &Path, row: &RegisterTerminalRequest) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn remove(db: &Path, session_id: &str) -> anyhow::Result<usize> {
+fn remove(db: &Path, session_id: &str, pid: Option<i64>) -> anyhow::Result<usize> {
     let conn = Connection::open(db)?;
     let n = conn.execute(
-        "DELETE FROM terminal_sessions WHERE session_id = ?1",
-        rusqlite::params![session_id],
+        "DELETE FROM terminal_sessions WHERE session_id = ?1 OR (?2 IS NOT NULL AND pid = ?2)",
+        rusqlite::params![session_id, pid],
     )?;
     Ok(n)
 }
@@ -174,12 +184,16 @@ pub async fn unregister(
     _tok: TerminalToken,
     Json(body): Json<UnregisterTerminalRequest>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    if body.session_id.trim().is_empty() {
-        return Err(json_err(StatusCode::BAD_REQUEST, "session_id is required"));
+    if body.session_id.trim().is_empty() && body.pid.is_none() {
+        return Err(json_err(
+            StatusCode::BAD_REQUEST,
+            "session_id or pid is required",
+        ));
     }
     let db: PathBuf = state.db_path.clone();
     let id = body.session_id.clone();
-    let n = tokio::task::spawn_blocking(move || remove(&db, &id))
+    let pid = body.pid;
+    let n = tokio::task::spawn_blocking(move || remove(&db, &id, pid))
         .await
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;

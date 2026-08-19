@@ -214,13 +214,9 @@ async fn handle_stream(
     let (mut sink, mut stream) = socket.split();
 
     let snapshot = session.snapshot().await;
-    if let Ok(mut value) = serde_json::to_value(&snapshot) {
-        if let Some(obj) = value.as_object_mut() {
-            obj.insert("kind".into(), serde_json::Value::String("snapshot".into()));
-        }
-        // One-off frame: SessionSnapshot as {"kind":"snapshot", ...} without
-        // extending cascade-core's SessionEvent enum.
-        let _ = sink.send(Message::Text(value.to_string().into())).await;
+    let frame = cascade_core::SessionEvent::Snapshot(snapshot);
+    if let Ok(text) = serde_json::to_string(&frame) {
+        let _ = sink.send(Message::Text(text.into())).await;
     }
 
     let mut events = session.subscribe();

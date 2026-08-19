@@ -23,6 +23,7 @@ impl CollabAttach {
     pub async fn connect(
         link: &str,
     ) -> anyhow::Result<(broadcast::Receiver<SessionEvent>, mpsc::Sender<GuestCommand>)> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let parsed = parse_collab_link(link)?;
         let name = std::env::var("CASCADE_COLLAB_NAME")
             .ok()

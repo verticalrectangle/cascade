@@ -14,7 +14,7 @@ pub struct Settings {
 }
 
 fn default_cloud_url() -> String {
-    "https://wickrunner.com:7700".to_string()
+    "https://wickrunner.com:7701".to_string()
 }
 
 fn default_backend() -> String {

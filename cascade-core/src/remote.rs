@@ -35,6 +35,7 @@ pub struct MachineInfo {
 
 impl CloudClient {
     pub async fn login(base_url: &str, email: &str, password: &str) -> Result<String> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let http = reqwest::Client::new();
         let url = join_url(base_url, "/auth/login");
         let resp = http
@@ -55,6 +56,7 @@ impl CloudClient {
     }
 
     pub async fn connect(base_url: &str, token: &str) -> Result<Self> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert(
             reqwest::header::AUTHORIZATION,

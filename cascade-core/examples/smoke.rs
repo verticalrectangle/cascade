@@ -39,6 +39,9 @@ async fn main() -> anyhow::Result<()> {
                     }
                     other => println!("event: {:?}", std::mem::discriminant(other)),
                 }
+                if matches!(&ev, SessionEvent::TodoChanged { .. }) {
+                    println!("TODOCHANGED fired");
+                }
                 if matches!(ev, SessionEvent::AgentEnd | SessionEvent::ProcessExited { .. }) {
                     break;
                 }
