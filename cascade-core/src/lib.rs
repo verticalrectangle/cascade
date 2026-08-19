@@ -1,14 +1,14 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
+pub mod rpc;
+pub mod session;
+pub mod registry;
+pub mod remote;
+pub mod state {
+    pub use crate::session::*;
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
-}
+pub use registry::{SessionMeta, SessionRegistry};
+pub use remote::{CloudClient, CloudCommand, MachineInfo};
+pub use session::{
+    OmpSession, RpcSessionState, SessionEvent, SessionManager, SessionSnapshot, SpawnOptions,
+    TodoItem, TodoPhase, TodoStatus, UiAnswer, UiMethod, UiRequest,
+};
