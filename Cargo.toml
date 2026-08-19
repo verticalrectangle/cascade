@@ -1,0 +1,7 @@
+[workspace]
+resolver = "2"
+members = ["cascade-core", "cascaded", "cascade-gtk"]
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
