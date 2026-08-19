@@ -47,12 +47,75 @@ pub async fn list_machines(
     Ok(Json(machines))
 }
 
+#[derive(Debug, Serialize)]
+pub struct ListedSession {
+    pub id: String,
+    pub omp_session_id: Option<String>,
+    pub name: Option<String>,
+    pub cwd: String,
+    pub session_file: Option<String>,
+    pub machine: String,
+    pub created_at: chrono::DateTime<chrono::Utc>,
+    pub last_active: chrono::DateTime<chrono::Utc>,
+    pub kind: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub join_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub view_handle: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
+}
+
 pub async fn list_sessions(
     State(state): State<AppState>,
     _user: AuthUser,
-) -> Result<Json<Vec<cascade_core::SessionMeta>>, (StatusCode, Json<serde_json::Value>)> {
+) -> Result<Json<Vec<ListedSession>>, (StatusCode, Json<serde_json::Value>)> {
     // Single-user phase: no per-account filter.
-    Ok(Json(state.sessions.list().await))
+    let mut out: Vec<ListedSession> = state
+        .sessions
+        .list()
+        .await
+        .into_iter()
+        .map(|m| ListedSession {
+            id: m.id,
+            omp_session_id: m.omp_session_id,
+            name: m.name,
+            cwd: m.cwd,
+            session_file: m.session_file,
+            machine: m.machine,
+            created_at: m.created_at,
+            last_active: m.last_active,
+            kind: "managed".into(),
+            join_handle: None,
+            view_handle: None,
+            pid: None,
+        })
+        .collect();
+    let db = state.db_path.clone();
+    let terminals = tokio::task::spawn_blocking(move || crate::terminal::list(&db))
+        .await
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    for t in terminals {
+        let created = chrono::DateTime::parse_from_rfc3339(&t.created_at)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        out.push(ListedSession {
+            id: t.session_id,
+            omp_session_id: None,
+            name: t.title,
+            cwd: t.cwd,
+            session_file: None,
+            machine: t.machine,
+            created_at: created,
+            last_active: created,
+            kind: "terminal".into(),
+            join_handle: Some(t.join_handle),
+            view_handle: Some(t.view_handle),
+            pid: t.pid,
+        });
+    }
+    Ok(Json(out))
 }
 
 pub async fn create_session(

@@ -1,0 +1,12 @@
+{
+	"name": "cascade-omp-plugin",
+	"version": "0.1.0",
+	"description": "Advertise local omp TUI sessions to Cascade via a collab host room",
+	"type": "module",
+	"license": "MIT",
+	"omp": {
+		"name": "cascade-omp-plugin",
+		"description": "Register TUI sessions with Cascade and host a collab guest link",
+		"extensions": ["index.ts"]
+	}
+}

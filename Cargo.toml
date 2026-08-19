@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["cascade-core", "cascaded", "cascade-gtk"]
+members = ["cascade-core", "cascaded", "cascade-gtk", "cascade-relay"]
 
 [profile.release]
 lto = "thin"

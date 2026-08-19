@@ -12,6 +12,7 @@
 //! | `CASCADE_CLOUD_URL` | — | Desktop: cloud base URL (`https://host`) |
 //! | `CASCADE_MACHINE_NAME` | — | Desktop: display name registered on `/relay` |
 //! | `CASCADE_MACHINE_TOKEN` | — | Desktop: shared secret; stable machine id |
+//! | `CASCADE_TERMINAL_TOKEN` | — | Shared bearer for POST/DELETE `/register-terminal` (`X-Cascade-Token`) |
 //!
 //! Args override env: `--role cloud`, `--bind 0.0.0.0:7700`, `--db ./cascade.db`.
 //!
@@ -44,6 +45,7 @@ mod auth;
 mod desktop;
 mod relay;
 mod routes;
+mod terminal;
 
 use std::net::SocketAddr;
 use std::path::PathBuf;
@@ -74,6 +76,7 @@ pub struct Config {
     pub machine_name: Option<String>,
     pub machine_token: Option<String>,
     pub allow_passwords: Vec<(String, String)>,
+    pub terminal_token: String,
 }
 
 #[derive(Clone)]
@@ -82,6 +85,7 @@ pub struct AppState {
     pub db_path: PathBuf,
     pub sessions: SessionManager,
     pub relay: RelayRouter,
+    pub terminal_token: String,
 }
 
 pub fn json_err(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -120,6 +124,7 @@ impl Config {
         let mut machine_name = env_opt("CASCADE_MACHINE_NAME");
         let mut machine_token = env_opt("CASCADE_MACHINE_TOKEN");
         let mut allow = env_opt("CASCADE_ALLOW_PASSWORDS").unwrap_or_default();
+        let mut terminal_token = env_opt("CASCADE_TERMINAL_TOKEN").unwrap_or_default();
 
         let mut args = std::env::args().skip(1);
         while let Some(arg) = args.next() {
@@ -153,6 +158,9 @@ impl Config {
                 "allow-passwords" => {
                     allow = val.ok_or_else(|| anyhow::anyhow!("--allow-passwords needs a value"))?
                 }
+                "terminal-token" => {
+                    terminal_token = val.ok_or_else(|| anyhow::anyhow!("--terminal-token needs a value"))?
+                }
                 other => anyhow::bail!("unknown flag --{other}"),
             }
         }
@@ -180,6 +188,7 @@ impl Config {
             machine_name,
             machine_token,
             allow_passwords: parse_allow_passwords(&allow),
+            terminal_token,
         })
     }
 }
@@ -245,6 +254,7 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
         auth::init_tables(&conn)?;
         auth::seed_if_empty(&conn, &cfg.allow_passwords)?;
         relay::init_tables(&conn)?;
+        terminal::init_tables(&conn)?;
     }
 
     let registry = SessionRegistry::open(&cfg.db)?;
@@ -256,6 +266,7 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
         db_path: cfg.db.clone(),
         sessions: sessions.clone(),
         relay,
+        terminal_token: cfg.terminal_token.clone(),
     };
 
     let app = Router::new()
@@ -268,6 +279,10 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
         .route("/sessions/{id}", axum::routing::delete(routes::delete_session))
         .route("/sessions/{id}/stream", get(routes::session_stream))
         .route("/relay", get(relay::relay_ws))
+        .route(
+            "/register-terminal",
+            post(terminal::register).delete(terminal::unregister),
+        )
         .layer(CorsLayer::permissive())
         .layer(TraceLayer::new_for_http())
         .with_state(state);
