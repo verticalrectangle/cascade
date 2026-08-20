@@ -9,6 +9,14 @@ use gtk4::prelude::*;
 use gtk4::{Application, CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION};
 
 const APP_ID: &str = "com.wickrunner.cascade";
+/// Test instances set CASCADE_APP_ID to coexist with a production instance
+/// (GApplication single-instance forwarding would otherwise exit silently).
+fn app_id() -> &'static str {
+    match std::env::var("CASCADE_APP_ID") {
+        Ok(_) => "com.wickrunner.cascade.test",
+        Err(_) => APP_ID,
+    }
+}
 const DAWN_CSS: &str = include_str!("theme/dawn.css");
 const MOON_CSS: &str = include_str!("theme/moon.css");
 
@@ -95,7 +103,7 @@ fn main() {
         });
     }
 
-    let app = Application::builder().application_id(APP_ID).build();
+    let app = Application::builder().application_id(app_id()).build();
     app.connect_startup(|_| load_css());
     app.connect_activate(move |app| {
         ui::build(app, cmd_tx.clone(), ui_rx.clone());

@@ -208,6 +208,9 @@ struct StreamState {
     tools: HashMap<String, ToolCard>,
     pending_ui: Option<String>,
     streaming: bool,
+    /// Text of the last optimistically-rendered user bubble + when, used to
+    /// suppress the duplicate from the MessageEnd echo of the same message.
+    last_user_echo: Option<(String, std::time::Instant)>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -252,7 +255,7 @@ pub struct Ui {
     pane_revealer: Revealer,
     pane_wrap: GtkBox,
     url_entry: Entry,
-    webview: webkit6::WebView,
+    webview: Option<webkit6::WebView>,
     pane_url: Option<String>,
     lightbox: Revealer,
     lightbox_pic: Picture,
@@ -531,16 +534,14 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     url_entry.set_placeholder_text(Some("https://…"));
     pane_head.append(&url_entry);
 
-    let webview = webkit6::WebView::new();
-    webview.set_vexpand(true);
-
+    // WebView created lazily on first pane open (see toggle_pane) —
+    // WebKitGTK can paint outside a collapsed revealer.
     pane_wrap.append(&pane_head);
-    pane_wrap.append(&webview);
 
     let pane_revealer = Revealer::new();
     pane_revealer.set_transition_type(RevealerTransitionType::SlideLeft);
     pane_revealer.set_transition_duration(220);
-    pane_revealer.set_reveal_child(settings.pane_visible);
+    pane_revealer.set_reveal_child(false); // opened via toggle_pane (lazy webview)
     pane_revealer.set_child(Some(&pane_wrap));
 
     let pane_divider = GtkBox::new(Orientation::Vertical, 0);
@@ -700,7 +701,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         pane_revealer,
         pane_wrap,
         url_entry,
-        webview,
+        webview: None,
         pane_url: None,
         lightbox,
         lightbox_pic,
@@ -936,18 +937,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
             if !url.contains("://") {
                 url = format!("https://{url}");
             }
-            ui.borrow().webview.load_uri(&url);
-        }));
-        u.webview.connect_load_changed(glib::clone!(#[strong] ui, move |wv, ev| {
-            if ev == webkit6::LoadEvent::Committed {
-                if let Some(uri) = wv.uri() {
-                    let uri = uri.to_string();
-                    let mut u = ui.borrow_mut();
-                    u.pane_url = Some(uri.clone());
-                    u.url_entry.set_text(&uri);
-                    let _ = u.cmd.try_send(Cmd::PaneToggle(uri));
-                }
-            }
+            if let Some(wv) = ui.borrow().webview.as_ref() { wv.load_uri(&url); }
         }));
     }
 
@@ -993,6 +983,12 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         glib::ControlFlow::Continue
     }));
 
+    // restore persisted pane state (creates the lazy webview)
+    if ui.borrow().settings.pane_visible {
+        let ui2 = ui.clone();
+        toggle_pane(&ui2);
+    }
+
     // UiMsg pump
     glib::timeout_add_local(Duration::from_millis(16), move || {
         while let Ok(msg) = ui_rx.try_recv() {
@@ -1029,6 +1025,28 @@ fn set_rail_visible(ui: &Rc<RefCell<Ui>>, visible: bool) {
 fn toggle_pane(ui: &Rc<RefCell<Ui>>) {
     let mut u = ui.borrow_mut();
     let next = !u.pane_revealer.reveals_child();
+    if next && u.webview.is_none() {
+        // lazy-create: keeps a hidden WebKit view from painting outside the
+        // collapsed revealer
+        let wv = webkit6::WebView::new();
+        wv.set_vexpand(true);
+        wv.connect_load_changed(glib::clone!(#[strong] ui, move |wv, ev| {
+            if ev == webkit6::LoadEvent::Committed {
+                if let Some(uri) = wv.uri() {
+                    let uri = uri.to_string();
+                    let mut u = ui.borrow_mut();
+                    u.pane_url = Some(uri.clone());
+                    u.url_entry.set_text(&uri);
+                    let _ = u.cmd.try_send(Cmd::PaneToggle(uri));
+                }
+            }
+        }));
+        u.pane_wrap.append(&wv);
+        if let Some(url) = u.pane_url.clone() {
+            wv.load_uri(&url);
+        }
+        u.webview = Some(wv);
+    }
     u.pane_revealer.set_reveal_child(next);
     u.pane_visible = next;
     u.settings.pane_visible = next;
@@ -1203,16 +1221,32 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
 
 /// Right-aligned user bubble card.
 fn append_user_bubble(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf]) {
+    append_user_bubble_inner(ui, text, images, false)
+}
+
+/// Optimistic render at send time; MessageEnd(user) echoes the same message
+/// back — skip the duplicate.
+fn append_user_bubble_inner(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf], from_echo: bool) {
+    if !from_echo {
+        ui.borrow_mut().stream.last_user_echo =
+            Some((text.to_string(), std::time::Instant::now()));
+    }
     let bubble = GtkBox::new(Orientation::Vertical, 6);
     bubble.add_css_class("user-bubble");
     bubble.set_halign(gtk4::Align::End);
     bubble.set_margin_start(120);
 
-    let tv = new_view(ui);
-    let buf = tv.buffer();
-    insert_tagged(&buf, text, "user");
-    attach_copy_menu(&tv, "Copy text");
-    bubble.append(&tv);
+    // A wrapping TextView reports ~zero natural width (text wraps to any
+    // width), which collapsed the bubble to a 28px sliver. A Label with
+    // max-width-chars measures its text and sizes the card correctly.
+    let l = Label::new(Some(text));
+    l.add_css_class("user-bubble-text");
+    l.set_wrap(true);
+    l.set_wrap_mode(pango::WrapMode::WordChar);
+    l.set_selectable(true);
+    l.set_xalign(0.0);
+    l.set_max_width_chars(72);
+    bubble.append(&l);
 
     for path in images {
         if let Ok(texture) = gdk::Texture::from_filename(path) {
@@ -1797,7 +1831,7 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             u.pane_url = url.clone();
             if let Some(url) = url {
                 u.url_entry.set_text(&url);
-                u.webview.load_uri(&url);
+                if let Some(wv) = u.webview.as_ref() { wv.load_uri(&url); }
             }
         }
         UiMsg::SessionState(st) => {
@@ -1911,7 +1945,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         SessionEvent::Ready { .. } => {}
         SessionEvent::TurnStarted => {
             set_streaming(ui, true);
-            ui.borrow_mut().stream.assistant = None;
+            let mut u = ui.borrow_mut();
+            u.stream.assistant = None;
+            u.stream.thinking_body = None;
         }
         SessionEvent::TextDelta { delta, .. } => {
             let existing = ui.borrow().stream.assistant.clone();
@@ -1937,7 +1973,14 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     let (card, body, _chev) =
                         make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking");
                     let mut u = ui.borrow_mut();
-                    u.live_box.append(&card);
+                    // insert right before the assistant text if it already
+                    // exists (thinking belongs above the reply); else append.
+                    if let Some(tv) = u.stream.assistant.as_ref() {
+                        let before = tv.prev_sibling();
+                        u.live_box.insert_child_after(&card, before.as_ref());
+                    } else {
+                        u.live_box.append(&card);
+                    }
                     u.stream.thinking_body = Some(body.clone());
                     body
                 }
@@ -1960,7 +2003,17 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             if let Some((role, text)) = parse_agent_message(&message) {
                 if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
                     if role == "user" || role == "human" {
-                        append_user_bubble(ui, &text, &[]);
+                        let dup = {
+                            let u = ui.borrow();
+                            u.stream.last_user_echo.as_ref().is_some_and(|(t, when)| {
+                                *t == text && when.elapsed() < std::time::Duration::from_secs(30)
+                            })
+                        };
+                        if dup {
+                            ui.borrow_mut().stream.last_user_echo = None;
+                        } else {
+                            append_user_bubble_inner(ui, &text, &[], true);
+                        }
                     } else {
                         let live = ui.borrow().live_box.clone();
                         render_markdown_into(ui, &live, &text);
