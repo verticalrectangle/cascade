@@ -78,6 +78,24 @@ impl SessionBackend {
         }
     }
 
+    /// Follow-up message while a turn is running (steer). The cloud/terminal
+    /// protocols have no steer verb; fall back to a regular prompt there.
+    pub async fn steer(&self, message: String) -> anyhow::Result<()> {
+        match self {
+            Self::Local(s) => s.steer(message).await,
+            Self::Cloud { cmd, .. } => {
+                cmd.send(CloudCommand::Prompt { message })?;
+                Ok(())
+            }
+            Self::Terminal { cmd, .. } => {
+                cmd.send(GuestCommand::Prompt { text: message })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("terminal steer: {e}"))?;
+                Ok(())
+            }
+        }
+    }
+
     pub async fn answer_ui(&self, request_id: String, response: UiAnswer) -> anyhow::Result<()> {
         match self {
             Self::Local(s) => s.answer_ui(request_id, response).await,
@@ -113,6 +131,12 @@ pub enum Cmd {
     },
     Prompt(String),
     Abort,
+    /// Follow-up message while streaming (steer / queue).
+    Queue(String),
+    /// User opened the inbox dropdown: clear unseen entries and re-broadcast.
+    InboxOpen,
+    /// Persist the browser-pane URL for the currently attached session.
+    PaneToggle(String),
     /// Resolve the Nth session of `kind` from the merged sorted list and open it
     /// (CASCADE_AUTOTEST hook; resolved through the normal OpenSession path).
     AutotestOpen { kind: BackendKind, index: usize },
@@ -140,6 +164,44 @@ pub enum UiMsg {
     Toast(String),
     Error(String),
     LoggedOut,
+    /// Unseen inbox entry count.
+    InboxCount(usize),
+    /// Full unseen inbox entry list (for the dropdown).
+    InboxItems(Vec<InboxItem>),
+    /// Browser-pane URL remembered for the just-attached session.
+    PaneUrl(Option<String>),
+    /// Live session state (local sessions only; model pill etc).
+    SessionState(Box<cascade_core::RpcSessionState>),
+}
+
+/// One unseen-inbox entry (turn finished, question pending, error).
+#[derive(Clone, Debug)]
+pub struct InboxItem {
+    pub text: String,
+    pub session_id: Option<String>,
+}
+
+use std::sync::Arc;
+
+use parking_lot::Mutex;
+
+/// Unseen inbox entries shared between the worker loop and event pumps.
+type Inbox = Arc<Mutex<Vec<InboxItem>>>;
+
+fn inbox_push(inbox: &Inbox, ui_tx: &async_channel::Sender<UiMsg>, item: InboxItem) {
+    let (n, items) = {
+        let mut g = inbox.lock();
+        g.push(item);
+        (g.len(), g.clone())
+    };
+    let _ = ui_tx.send_blocking(UiMsg::InboxCount(n));
+    let _ = ui_tx.send_blocking(UiMsg::InboxItems(items));
+}
+
+fn inbox_clear(inbox: &Inbox, ui_tx: &async_channel::Sender<UiMsg>) {
+    inbox.lock().clear();
+    let _ = ui_tx.send_blocking(UiMsg::InboxCount(0));
+    let _ = ui_tx.send_blocking(UiMsg::InboxItems(Vec::new()));
 }
 
 pub async fn worker(
@@ -149,6 +211,7 @@ pub async fn worker(
 ) {
     let mut settings = Settings::load();
     let _ = std::fs::create_dir_all(Settings::config_dir());
+    let inbox: Inbox = Arc::new(Mutex::new(Vec::new()));
     let registry = match SessionRegistry::open(&Settings::registry_path()) {
         Ok(r) => r,
         Err(e) => {
@@ -272,7 +335,7 @@ pub async fn worker(
                         match manager.spawn(opts).await {
                             Ok(id) => {
                                 if let Some(sess) = manager.get(&id).await {
-                                    attach_local(sess, &mut current, &mut pump, &ui_tx).await;
+                                    attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings).await;
                                     push_sessions(
                                         &manager,
                                         cloud.as_ref(),
@@ -306,14 +369,15 @@ pub async fn worker(
                                         session_id: id.clone(),
                                         cmd: cmd_tx,
                                     });
-                                    pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone()));
+                                    pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                                     let _ = ui_tx
                                         .send(UiMsg::Attached {
-                                            id,
+                                            id: id.clone(),
                                             kind: BackendKind::Cloud,
                                             snapshot: None,
                                         })
                                         .await;
+                                    send_pane_url(&settings, &id, &ui_tx).await;
                                     push_sessions(
                                         &manager,
                                         cloud.as_ref(),
@@ -386,7 +450,7 @@ pub async fn worker(
             } => match kind {
                 BackendKind::Local => {
                     if let Some(sess) = manager.get(&id).await {
-                        attach_local(sess, &mut current, &mut pump, &ui_tx).await;
+                        attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings).await;
                     } else {
                         let _ = ui_tx
                             .send(UiMsg::Error(format!("local session {id} not running")))
@@ -409,14 +473,15 @@ pub async fn worker(
                                 session_id: id.clone(),
                                 cmd: cmd_tx,
                             });
-                            pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone()));
+                            pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
                                 .send(UiMsg::Attached {
-                                    id,
+                                    id: id.clone(),
                                     kind: BackendKind::Cloud,
                                     snapshot: None,
                                 })
                                 .await;
+                            send_pane_url(&settings, &id, &ui_tx).await;
                         }
                         Err(e) => {
                             let _ = ui_tx.send(UiMsg::Error(format!("attach: {e:#}"))).await;
@@ -444,14 +509,15 @@ pub async fn worker(
                                 session_id: id.clone(),
                                 cmd: cmd_tx,
                             });
-                            pump = Some(spawn_broadcast_pump(ev_rx, ui_tx.clone()));
+                            pump = Some(spawn_broadcast_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
                                 .send(UiMsg::Attached {
-                                    id,
+                                    id: id.clone(),
                                     kind: BackendKind::Terminal,
                                     snapshot: None,
                                 })
                                 .await;
+                            send_pane_url(&settings, &id, &ui_tx).await;
                         }
                         Err(e) => {
                             let _ = ui_tx
@@ -479,6 +545,26 @@ pub async fn worker(
                     }
                 }
             }
+            Cmd::Queue(message) => {
+                if let Some(b) = current.as_ref() {
+                    if let Err(e) = b.steer(message).await {
+                        let _ = ui_tx.send(UiMsg::Error(format!("queue: {e:#}"))).await;
+                    }
+                } else {
+                    let _ = ui_tx
+                        .send(UiMsg::Error("no session attached".into()))
+                        .await;
+                }
+            }
+            Cmd::InboxOpen => {
+                inbox_clear(&inbox, &ui_tx);
+            }
+            Cmd::PaneToggle(url) => {
+                if let Some(b) = current.as_ref() {
+                    settings.pane_urls.insert(b.id(), url);
+                    let _ = settings.save();
+                }
+            }
             Cmd::Answer {
                 request_id,
                 response,
@@ -495,9 +581,10 @@ pub async fn worker(
                         Ok(st) => {
                             let _ = ui_tx
                                 .send(UiMsg::Event(SessionEvent::TodoChanged {
-                                    phases: st.todo_phases,
+                                    phases: st.todo_phases.clone(),
                                 }))
                                 .await;
+                            let _ = ui_tx.send(UiMsg::SessionState(Box::new(st))).await;
                         }
                         Err(e) => {
                             let _ = ui_tx
@@ -516,6 +603,8 @@ async fn attach_local(
     current: &mut Option<SessionBackend>,
     pump: &mut Option<AbortHandle>,
     ui_tx: &async_channel::Sender<UiMsg>,
+    inbox: &Inbox,
+    settings: &Settings,
 ) {
     if let Some(h) = pump.take() {
         h.abort();
@@ -523,25 +612,34 @@ async fn attach_local(
     let id = sess.id().to_string();
     let snapshot = sess.snapshot().await;
     let rx = sess.subscribe();
-    *pump = Some(spawn_broadcast_pump(rx, ui_tx.clone()));
+    *pump = Some(spawn_broadcast_pump(rx, ui_tx.clone(), inbox.clone()));
     *current = Some(SessionBackend::Local(sess));
     let _ = ui_tx
         .send(UiMsg::Attached {
-            id,
+            id: id.clone(),
             kind: BackendKind::Local,
             snapshot: Some(snapshot),
         })
+        .await;
+    send_pane_url(settings, &id, ui_tx).await;
+}
+
+async fn send_pane_url(settings: &Settings, id: &str, ui_tx: &async_channel::Sender<UiMsg>) {
+    let _ = ui_tx
+        .send(UiMsg::PaneUrl(settings.pane_urls.get(id).cloned()))
         .await;
 }
 
 fn spawn_broadcast_pump(
     mut rx: tokio::sync::broadcast::Receiver<SessionEvent>,
     ui_tx: async_channel::Sender<UiMsg>,
+    inbox: Inbox,
 ) -> AbortHandle {
     tokio::spawn(async move {
         loop {
             match rx.recv().await {
                 Ok(ev) => {
+                    pump_inbox(&ev, &inbox, &ui_tx);
                     if ui_tx.send(UiMsg::Event(ev)).await.is_err() {
                         break;
                     }
@@ -557,15 +655,45 @@ fn spawn_broadcast_pump(
 fn spawn_mpsc_pump(
     mut rx: mpsc::UnboundedReceiver<SessionEvent>,
     ui_tx: async_channel::Sender<UiMsg>,
+    inbox: Inbox,
 ) -> AbortHandle {
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
+            pump_inbox(&ev, &inbox, &ui_tx);
             if ui_tx.send(UiMsg::Event(ev)).await.is_err() {
                 break;
             }
         }
     })
     .abort_handle()
+}
+
+/// Feed the unseen-inbox from noteworthy session events.
+fn pump_inbox(ev: &SessionEvent, inbox: &Inbox, ui_tx: &async_channel::Sender<UiMsg>) {
+    let item = match ev {
+        SessionEvent::AgentEnd => Some(InboxItem {
+            text: "turn completed".into(),
+            session_id: None,
+        }),
+        SessionEvent::UiRequest(req) => Some(InboxItem {
+            text: format!(
+                "question: {}",
+                req.title
+                    .as_deref()
+                    .or(req.message.as_deref())
+                    .unwrap_or("input requested")
+            ),
+            session_id: None,
+        }),
+        SessionEvent::Notice { level, message } if level == "error" => Some(InboxItem {
+            text: format!("error: {message}"),
+            session_id: None,
+        }),
+        _ => None,
+    };
+    if let Some(item) = item {
+        inbox_push(inbox, ui_tx, item);
+    }
 }
 
 async fn push_sessions(

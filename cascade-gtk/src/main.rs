@@ -1,3 +1,5 @@
+mod highlight;
+mod markdown;
 mod settings;
 mod ui;
 mod worker;
@@ -7,7 +9,24 @@ use gtk4::prelude::*;
 use gtk4::{Application, CssProvider, STYLE_PROVIDER_PRIORITY_APPLICATION};
 
 const APP_ID: &str = "com.wickrunner.cascade";
-const THEME_CSS: &str = include_str!("theme/style.css");
+const DAWN_CSS: &str = include_str!("theme/dawn.css");
+const MOON_CSS: &str = include_str!("theme/moon.css");
+
+thread_local! {
+    static PROVIDER: std::cell::RefCell<Option<CssProvider>> = const { std::cell::RefCell::new(None) };
+}
+
+/// Swap the app-wide theme ("dawn" default, "moon" dark).
+pub fn apply_theme(name: &str) {
+    PROVIDER.with(|p| {
+        if let Some(provider) = p.borrow().as_ref() {
+            match name {
+                "moon" => provider.load_from_data(MOON_CSS),
+                _ => provider.load_from_data(DAWN_CSS),
+            }
+        }
+    });
+}
 
 fn main() {
     tracing_subscriber::fmt()
@@ -86,7 +105,12 @@ fn main() {
 
 fn load_css() {
     let provider = CssProvider::new();
-    provider.load_from_data(THEME_CSS);
+    let theme = settings::Settings::load().theme;
+    match theme.as_str() {
+        "moon" => provider.load_from_data(MOON_CSS),
+        _ => provider.load_from_data(DAWN_CSS),
+    }
+    PROVIDER.with(|p| *p.borrow_mut() = Some(provider.clone()));
     if let Some(display) = gdk::Display::default() {
         gtk4::style_context_add_provider_for_display(
             &display,

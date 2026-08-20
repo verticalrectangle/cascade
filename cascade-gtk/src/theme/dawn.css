@@ -1,0 +1,868 @@
+/* Omperator — Rosé Pine Dawn (light), retro-futuristic 2005 treatment.
+   Soft bevels: bright top edge + shaded bottom edge on panels; warm gold
+   accent glow; monospace transcript/composer chrome.
+   GTK4 CSS subset: concrete values only (no var()/calc()/media/pseudo-elements). */
+
+window {
+  background-color: #FAF4ED;
+  color: #575279;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 11pt;
+}
+
+/* ── Session rail ─────────────────────────────────────────── */
+
+.rail {
+  background-color: transparent;
+  border: none;
+  border-right: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 10px;
+  margin: 0;
+  box-shadow: none;
+}
+
+/* Right pane sidebar (renamed from .rail in widget code; both styled). */
+.pane-sidebar {
+  background-color: transparent;
+  border: none;
+  border-left: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 10px;
+  margin: 0;
+  box-shadow: none;
+}
+
+.rail-item {
+  padding: 8px 10px;
+  border-radius: 0;
+  color: #575279;
+}
+
+.rail-item:hover {
+  background-color: rgba(223, 218, 217, 0.55);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.7);
+}
+
+.rail-item-selected {
+  color: #B4637A;
+}
+
+.rail-caption-working {
+  color: #EA9D34;
+}
+
+/* ── Transcript ───────────────────────────────────────────── */
+
+.transcript {
+  background-color: transparent;
+  padding: 16px;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 10.5pt;
+}
+
+/* Right-aligned glass card; widget code positions it, we style the surface. */
+.user-bubble {
+  background-color: rgba(255, 255, 255, 0.6);
+  border: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 10px 13px;
+  color: #575279;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  box-shadow: none;
+}
+
+.assistant-message {
+  background-color: transparent;
+  color: #575279;
+  font-family: "New York", "Charter", Georgia, serif;
+  font-size: 18px;
+}
+
+.code-block {
+  background-color: #F2E9E1;
+  border: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 10px 12px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12.5pt;
+  color: #56949F;
+  box-shadow: none;
+}
+
+/* Code header row: uppercase done in widget code (no text-transform in GTK). */
+.code-header {
+  color: #797593;
+  font-size: 8.5pt;
+  font-weight: 700;
+  padding: 2px 2px 6px 2px;
+}
+
+.code-copy {
+  background-color: rgba(255, 255, 255, 0.65);
+  border: 1px solid #CECACD;
+  border-top-color: #FFFFFF;
+  border-bottom-color: #B6B1C0;
+  border-radius: 0;
+  padding: 3px 10px;
+  color: #6E6A8A;
+  font-size: 8.5pt;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(87, 82, 121, 0.15);
+}
+
+.code-copy:hover {
+  background-color: #FFFFFF;
+  color: #575279;
+  box-shadow: 0 1px 2px rgba(87, 82, 121, 0.15),
+              0 0 8px rgba(86, 148, 159, 0.18);
+}
+
+.code-copy:active {
+  background-color: #F2E9E1;
+  box-shadow: inset 0 1px 2px rgba(87, 82, 121, 0.2);
+}
+
+/* ── Syntax highlighting ──────────────────────────────────── */
+
+.syn-keyword   { color: #907AA9; font-weight: 600; }
+.syn-string    { color: #56949F; }
+.syn-comment   { color: #9893A5; font-style: italic; }
+.syn-number    { color: #EA9D34; }
+.syn-type      { color: #286983; }
+.syn-function  { color: #D7827E; }
+.syn-attribute { color: #907AA9; font-style: italic; }
+.syn-plain     { color: #575279; }
+
+/* ── Tool & advisory cards ────────────────────────────────── */
+
+.tool-card {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-top-color: #FFFFFF;
+  border-left: 3px solid #286983;
+  border-radius: 0;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.15);
+}
+
+.tool-head {
+  color: #286983;
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+
+.tool-meta {
+  color: #797593;
+  font-size: 9pt;
+}
+
+.advisory-card {
+  background-color: rgba(234, 157, 52, 0.1);
+  border: 1px solid rgba(234, 157, 52, 0.3);
+  border-top-color: rgba(234, 157, 52, 0.5);
+  border-left: 3px solid #EA9D34;
+  border-radius: 0;
+  padding: 10px 12px;
+  color: #575279;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.12),
+              0 0 8px rgba(234, 157, 52, 0.1);
+}
+
+/* Severity variants (widget adds advisory-<severity>; later rules win). */
+.advisory-info {
+  background-color: rgba(40, 105, 131, 0.08);
+  border-color: rgba(40, 105, 131, 0.3);
+  border-top-color: rgba(40, 105, 131, 0.5);
+  border-left-color: #286983;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.12),
+              0 0 8px rgba(40, 105, 131, 0.12);
+}
+
+.advisory-error {
+  background-color: rgba(180, 99, 122, 0.08);
+  border-color: rgba(180, 99, 122, 0.3);
+  border-top-color: rgba(180, 99, 122, 0.5);
+  border-left-color: #B4637A;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.12),
+              0 0 8px rgba(180, 99, 122, 0.12);
+}
+
+/* Tool-kind rail tints (widget adds tool-<kind>). */
+.tool-tool-use    { border-left-color: #286983; }
+.tool-tool-result { border-left-color: #56949F; }
+.tool-thinking    { border-left-color: #907AA9; }
+
+/* Prose/bubble/advisory bodies are GtkTextViews — keep the glass visible. */
+.user-bubble textview,
+.user-bubble textview text,
+.assistant-message textview,
+.assistant-message textview text,
+.tool-card textview,
+.tool-card textview text,
+.advisory-card textview,
+.advisory-card textview text {
+  background-color: transparent;
+}
+
+/* ── Markdown / transcript elements ───────────────────────── */
+
+.md-h1 {
+  font-size: 17pt;
+  font-weight: 700;
+  color: #EA9D34;
+  margin: 12px 0 6px 0;
+}
+
+.md-h2 {
+  font-size: 15pt;
+  font-weight: 700;
+  color: #EA9D34;
+  margin: 10px 0 5px 0;
+}
+
+.md-h3 {
+  font-size: 13pt;
+  font-weight: 600;
+  color: #575279;
+  margin: 8px 0 4px 0;
+}
+
+.md-bold   { font-weight: 700; color: #EA9D34; }
+.md-italic { font-style: italic; color: #575279; }
+
+.md-inline-code {
+  background-color: rgba(86, 148, 159, 0.16);
+  border-radius: 0;
+  padding: 1px 4px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12pt;
+  color: #286983;
+}
+
+.md-quote {
+  border-left: 3px solid rgba(234, 157, 52, 0.65);
+  padding: 4px 10px;
+  margin: 6px 0;
+  color: #6E6A8A;
+  font-style: italic;
+}
+
+.md-list {
+  padding-left: 18px;
+  color: #575279;
+}
+
+.md-link {
+  color: #907AA9;
+  text-decoration-line: underline;
+}
+
+/* ── Diff & terminal ──────────────────────────────────────── */
+
+.diff-add {
+  background-color: rgba(86, 148, 159, 0.22);
+  color: #286983;
+}
+
+.diff-remove {
+  background-color: rgba(180, 99, 122, 0.16);
+  color: #B4637A;
+}
+
+.terminal {
+  background-color: #1F1D2E;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 10px 12px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 10pt;
+  color: #E0DEF4;
+  box-shadow: inset 0 1px 3px rgba(14, 12, 24, 0.7);
+}
+
+/* ── Composer ─────────────────────────────────────────────── */
+
+.composer {
+  background-color: rgba(255, 255, 255, 0.65);
+  border: 1px solid #CECACD;
+  border-top-color: #FFFFFF;
+  border-bottom-color: #B6B1C0;
+  border-radius: 0;
+  padding: 8px 12px;
+  margin: 10px 12px;
+  box-shadow: 0 2px 6px rgba(87, 82, 121, 0.18),
+              0 0 8px rgba(234, 157, 52, 0.07);
+}
+
+.composer-view,
+.composer-view text {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #575279;
+  caret-color: #EA9D34;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 10.5pt;
+}
+
+/* Wrapping composer: the scrolled window draws nothing itself. */
+.composer scrolledwindow,
+.composer scrolledwindow viewport {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.attachment-strip {
+  padding: 2px 0;
+}
+
+.attachment-chip {
+  background-color: rgba(255, 250, 243, 0.92);
+  border: 1px solid rgba(121, 117, 147, 0.55);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.chip-name {
+  color: #797593;
+  font-size: 9pt;
+}
+
+.chip-remove {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #797593;
+  padding: 2px 6px;
+}
+
+.chip-remove:hover {
+  color: #B4637A;
+}
+
+.queue-strip {
+  padding: 0;
+}
+
+.queue-chip {
+  color: #797593;
+  font-size: 9pt;
+}
+
+.stop-button,
+.queue-button {
+  background-color: transparent;
+  color: #575279;
+  border: 1px solid rgba(121, 117, 147, 0.55);
+  border-radius: 0;
+  padding: 4px 10px;
+  font-weight: 600;
+}
+
+.stop-button:hover,
+.queue-button:hover {
+  border-color: rgba(234, 157, 52, 0.7);
+  color: #EA9D34;
+}
+
+/* Transcript image previews (artifact rows + preview captures). */
+.transcript-image {
+  border: 1px solid rgba(121, 117, 147, 0.45);
+  border-radius: 4px;
+  margin: 4px 0;
+}
+
+/* Files pane thumbnails. */
+.file-thumb {
+  border-radius: 3px;
+}
+
+/* Click-to-zoom lightbox: light wash over the whole window. */
+.lightbox-backdrop {
+  background-color: rgba(250, 244, 237, 0.85);
+}
+
+/* Copy chrome: hover-revealed ghost button + right-click menu. */
+.copy-ghost {
+  background-color: rgba(255, 250, 243, 0.9);
+  border: 1px solid rgba(121, 117, 147, 0.5);
+  border-radius: 4px;
+  box-shadow: none;
+  color: #797593;
+  padding: 1px 6px;
+  margin: 4px;
+}
+
+.copy-ghost:hover {
+  color: #575279;
+  border-color: rgba(234, 157, 52, 0.6);
+}
+
+.copy-menu {
+  background-color: rgba(255, 250, 243, 0.98);
+  border: 1px solid rgba(121, 117, 147, 0.5);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.copy-menu-item {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #575279;
+  padding: 6px 14px;
+  border-radius: 4px;
+}
+
+.copy-menu-item:hover {
+  background-color: rgba(242, 233, 222, 0.9);
+  color: #EA9D34;
+}
+
+.send-button {
+  background-color: #EA9D34;
+  color: #FFFAF3;
+  border: 1px solid #D98C22;
+  border-top-color: #F2B254;
+  border-bottom-color: #C47D1A;
+  border-radius: 0;
+  padding: 4px 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.25),
+              0 0 6px rgba(234, 157, 52, 0.3);
+}
+
+.send-button:hover {
+  background-color: #F2B254;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.25),
+              0 0 10px rgba(234, 157, 52, 0.45);
+}
+
+.send-button:active {
+  background-color: #D98C22;
+  box-shadow: inset 0 1px 2px rgba(87, 82, 121, 0.3);
+}
+
+/* ── Cards & text roles ───────────────────────────────────── */
+
+.card {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-top-color: #FFFFFF;
+  border-bottom-color: #CECACD;
+  border-radius: 0;
+  padding: 12px;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.15);
+}
+
+.muted  { color: #797593; }
+.subtle { color: #6E6A8A; }
+.accent { color: #EA9D34; }
+
+/* ── Scrolled windows ─────────────────────────────────────── */
+
+scrolledwindow {
+  background-color: transparent;
+}
+
+scrollbar slider {
+  background-color: #9893A5;
+  border-radius: 0;
+  min-width: 6px;
+}
+
+scrollbar slider:hover {
+  background-color: #797593;
+}
+
+/* Flat glyph buttons (toggles) — no box until hover (retro-2005 toolbar). */
+.flat-btn {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 2px 7px;
+  color: #797593;
+  font-weight: 500;
+  box-shadow: none;
+}
+.flat-btn:hover {
+  background: rgba(86,148,159,0.16);
+  color: #575279;
+}
+.flat-btn:active {
+  background: rgba(86,148,159,0.16);
+}
+
+/* Slim top bar: no card chrome, aligned with the sidebar header rows. */
+.topbar {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #DFDAD9;
+  padding: 2px 6px;
+  min-height: 0;
+}
+.topbar-title {
+  color: #403C58;
+  font-weight: 600;
+  font-size: 17px;
+}
+
+/* Collapsible card headers (click to expand). */
+.card-header {
+  background: transparent;
+  border: none;
+  padding: 3px 8px;
+  min-height: 0;
+  color: #797593;
+  font-weight: 600;
+  font-size: 9pt;
+}
+.card-header:hover { background: rgba(86,148,159,0.16); color: #575279; }
+.card-chevron { color: #797593; font-size: 9pt; }
+.tool-card.collapsed, .code-block.collapsed, .advisory-card.collapsed { padding-bottom: 0; }
+
+/* ── First-run onboarding (login screen) ──────────────────── */
+
+/* Full-window dim backdrop over the workspace. */
+.onboarding {
+  background-color: rgba(250, 244, 237, 0.93);
+}
+
+.login-card {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-top-color: #FFFFFF;
+  border-radius: 0;
+  padding: 28px 32px;
+  box-shadow: 0 4px 18px rgba(87, 82, 121, 0.2),
+              0 0 12px rgba(234, 157, 52, 0.06);
+}
+
+.login-title {
+  color: #403C58;
+  font-size: 19pt;
+  font-weight: 700;
+}
+
+.login-subtle {
+  color: #6E6A8A;
+  font-size: 10pt;
+}
+
+.login-entry,
+.login-entry text {
+  background-color: rgba(255, 255, 255, 0.65);
+  border: 1px solid #CECACD;
+  border-top-color: #FFFFFF;
+  border-radius: 0;
+  padding: 8px 12px;
+  color: #575279;
+  caret-color: #EA9D34;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 11pt;
+}
+
+.login-entry placeholder {
+  color: #9893A5;
+}
+
+.login-button {
+  background-color: #EA9D34;
+  color: #FFFAF3;
+  border: 1px solid #D98C22;
+  border-top-color: #F2B254;
+  border-bottom-color: #C07F1C;
+  border-radius: 0;
+  padding: 7px 14px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.25),
+              0 0 6px rgba(234, 157, 52, 0.25);
+}
+
+.login-button:hover {
+  background-color: #F2B254;
+  box-shadow: 0 1px 3px rgba(87, 82, 121, 0.25),
+              0 0 10px rgba(234, 157, 52, 0.4);
+}
+
+.login-button:active {
+  background-color: #D98C22;
+  box-shadow: inset 0 1px 2px rgba(87, 82, 121, 0.3);
+}
+
+.login-button:disabled {
+  background-color: #E4DEDE;
+  color: #9893A5;
+  border-color: #CECACD;
+  box-shadow: none;
+}
+
+.login-error {
+  color: #B4637A;
+  font-size: 10pt;
+}
+
+/* ── Settings popover (plain-language toggles) ────────────── */
+
+.settings-popover {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 10px 14px;
+}
+
+.settings-popover checkbutton {
+  color: #575279;
+  font-size: 10.5pt;
+  padding: 4px 2px;
+}
+
+.settings-popover check {
+  background-color: #FFFFFF;
+  border: 1px solid #9893A5;
+  border-radius: 0;
+  min-width: 14px;
+  min-height: 14px;
+}
+
+.settings-popover check:checked {
+  background-color: #EA9D34;
+  border-color: #D98C22;
+}
+
+.settings-popover check:checked image {
+  color: #FFFFFF;
+}
+
+/* Rail search + grouping + section headers */
+.rail-search {
+  background-color: rgba(255, 255, 255, 0.8);
+  border: 1px solid #CECACD;
+  color: #575279;
+  caret-color: #B4637A;
+  margin: 4px 10px;
+  padding: 3px 8px;
+  min-height: 0;
+  font-size: 9.5pt;
+}
+.rail-section {
+  color: #B4637A;
+  font-size: 8.5pt;
+  font-weight: bold;
+  letter-spacing: 1px;
+  padding: 8px 12px 2px 12px;
+  text-transform: uppercase;
+}
+
+/* Segmented grouping control: Recent / Project */
+.rail-segmented {
+  margin: 0 10px 6px 10px;
+  background-color: rgba(240, 233, 228, 0.8);
+  border: 1px solid #CECACD;
+  border-radius: 6px;
+}
+.rail-segment {
+  background-color: transparent;
+  border: none;
+  color: #9893A5;
+  padding: 3px 0;
+  min-height: 0;
+  font-size: 8.5pt;
+}
+.rail-segment-active {
+  color: #B4637A;
+  font-weight: 600;
+}
+
+/* Card header button: strip button chrome so it reads as a plain row that
+   happens to be clickable (activation, not a visible button). */
+.card-header-btn {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+}
+.card-header-btn:hover { background: transparent; }
+
+/* Text selection: visible translucent rose wash, text keeps its color. */
+selection {
+  background-color: rgba(180, 99, 122, 0.22);
+  color: #575279;
+}
+
+/* Resizable sidebar drag handles (rail + panes). The strip stays visible when
+   the rail is collapsed so a drag from the left edge reopens it. */
+.pane-divider {
+  min-width: 6px;
+  background-color: transparent;
+}
+.pane-divider:hover {
+  background-color: rgba(154, 140, 220, 0.35);
+}
+
+/* ── Cascade additions (question card, inbox, plan, toasts, pills) ── */
+
+/* Question / approval card floating above the composer. */
+.question-card {
+  background-color: #FFFAF3;
+  border: 1.5px solid #2A2740;
+  border-radius: 0;
+  padding: 12px 14px;
+  margin: 0 12px;
+  box-shadow: 0 2px 10px rgba(42, 39, 64, 0.2);
+}
+.question-title {
+  color: #2A2740;
+  font-size: 15px;
+  font-weight: 600;
+}
+.question-body { color: #575279; font-size: 10.5pt; }
+.question-option {
+  background-color: transparent;
+  border: 1px solid #DFDAD9;
+  border-radius: 0;
+  box-shadow: none;
+  color: #575279;
+  padding: 6px 10px;
+  font-size: 10.5pt;
+}
+.question-option:hover {
+  background-color: #B4637A;
+  border-color: #B4637A;
+  color: #FFFAF3;
+}
+.allow-btn {
+  background-color: #286983;
+  color: #FFFAF3;
+  border: 1px solid #1F5A70;
+  border-radius: 0;
+  padding: 4px 14px;
+  font-weight: 600;
+  font-size: 9.5pt;
+}
+.allow-btn:hover { background-color: #317694; }
+.deny-btn {
+  background-color: #B4637A;
+  color: #FFFAF3;
+  border: 1px solid #9E5568;
+  border-radius: 0;
+  padding: 4px 14px;
+  font-weight: 600;
+  font-size: 9.5pt;
+}
+.deny-btn:hover { background-color: #C2748A; }
+.question-timeout { color: #797593; font-size: 9pt; }
+
+/* Inbox badge + dropdown. */
+.inbox-badge {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 2px 7px;
+  color: #B4637A;
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+.inbox-badge:hover { background: rgba(180, 99, 122, 0.14); }
+.inbox-popover {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-radius: 0;
+  padding: 6px;
+}
+.inbox-item {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #575279;
+  padding: 6px 10px;
+  font-size: 10pt;
+}
+.inbox-item:hover { background-color: rgba(223, 218, 217, 0.55); }
+.inbox-empty { color: #797593; font-size: 9.5pt; padding: 8px 12px; }
+
+/* Topbar status + model pill. */
+.status-label { color: #403C58; font-weight: 600; font-size: 10.5pt; }
+.model-pill {
+  color: #797593;
+  font-size: 8.5pt;
+  font-weight: 600;
+  border: 1px solid #CECACD;
+  border-radius: 0;
+  padding: 1px 8px;
+}
+
+/* Plan slide-over. */
+.plan-panel {
+  background-color: #FFFAF3;
+  border: 1px solid #DFDAD9;
+  border-top-color: #FFFFFF;
+  border-radius: 0;
+  padding: 10px 12px;
+  margin: 10px 10px 10px 0;
+  box-shadow: 0 2px 8px rgba(87, 82, 121, 0.18);
+}
+.plan-phase { color: #286983; font-weight: 700; font-size: 9.5pt; margin-top: 4px; }
+.plan-task { color: #575279; font-size: 10pt; }
+.plan-task.completed { color: #797593; }
+.plan-task.in-progress { color: #EA9D34; }
+.plan-task.blocked, .plan-task.abandoned { color: #B4637A; }
+
+/* Toast. */
+.toast {
+  background-color: rgba(42, 39, 64, 0.92);
+  color: #FFFAF3;
+  border-radius: 0;
+  padding: 6px 14px;
+  margin-top: 8px;
+  font-size: 9.5pt;
+}
+
+/* Composer hint line. */
+.composer-hint { color: #9893A5; font-size: 8.5pt; }
+
+/* Rail row extras. */
+.rail-row-title { color: #575279; font-size: 10pt; font-weight: 600; }
+.rail-row-sub { color: #797593; font-size: 8.5pt; }
+.rail-status { color: #797593; font-size: 8pt; font-weight: 700; }
+.rail-status.active { color: #EA9D34; }
+.context-bar trough {
+  background-color: rgba(223, 218, 217, 0.8);
+  min-height: 3px;
+  border-radius: 0;
+}
+.context-bar progress {
+  background-color: #56949F;
+  min-height: 3px;
+  border-radius: 0;
+}
+
+/* Code/prose bodies are GtkTextViews — keep surfaces visible. */
+.code-block textview, .code-block textview text,
+.prose textview, .prose textview text,
+.composer-view textview, .composer-view textview text {
+  background-color: transparent;
+}
+
+/* "Use locally without account" link. */
+.login-link {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #907AA9;
+  text-decoration-line: underline;
+  padding: 2px 4px;
+  font-size: 9.5pt;
+}
+.login-link:hover { color: #B4637A; }
+
+/* Attachment chip thumb + lightbox. */
+.lightbox {
+  background-color: rgba(250, 244, 237, 0.92);
+}

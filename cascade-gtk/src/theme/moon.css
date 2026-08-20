@@ -1,0 +1,878 @@
+/* Omperator — Rosé Pine Moon (dark), retro-futuristic 2005 treatment.
+   Soft bevels: light top edge + darker bottom edge on panels; warm gold
+   accent glow; monospace transcript/composer chrome.
+   GTK4 CSS subset: concrete values only (no var()/calc()/media/pseudo-elements). */
+
+window {
+  background-color: #232136;
+  color: #E0DEF4;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 11pt;
+}
+
+/* ── Session rail ─────────────────────────────────────────── */
+
+.rail {
+  background-color: transparent;
+  border: none;
+  border-right: 1px solid #393552;
+  border-radius: 0;
+  padding: 10px;
+  margin: 0;
+  box-shadow: none;
+}
+
+/* Right pane sidebar (renamed from .rail in widget code; both styled). */
+.pane-sidebar {
+  background-color: transparent;
+  border: none;
+  border-left: 1px solid #393552;
+  border-radius: 0;
+  padding: 10px;
+  margin: 0;
+  box-shadow: none;
+}
+
+.rail-item {
+  padding: 8px 10px;
+  border-radius: 0;
+  color: #E0DEF4;
+}
+
+.rail-item:hover {
+  background-color: rgba(57, 53, 82, 0.55);
+  box-shadow: inset 0 1px 0 rgba(86, 82, 110, 0.4);
+}
+
+.rail-item-selected {
+  color: #F6C177;
+}
+
+.rail-caption-working {
+  color: #F6C177;
+}
+
+/* ── Transcript ───────────────────────────────────────────── */
+
+.transcript {
+  background-color: transparent;
+  padding: 16px;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 10.5pt;
+}
+
+/* Right-aligned glass card; widget code positions it, we style the surface. */
+.user-bubble {
+  background-color: rgba(57, 53, 82, 0.55);
+  border: 1px solid #393552;
+  border-radius: 0;
+  padding: 10px 13px;
+  color: #E0DEF4;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 15px;
+  box-shadow: none;
+}
+
+.assistant-message {
+  background-color: transparent;
+  color: #E0DEF4;
+  font-family: "New York", "Charter", Georgia, serif;
+  font-size: 18px;
+}
+
+.code-block {
+  background-color: #2A273F;
+  border: 1px solid #393552;
+  border-radius: 0;
+  padding: 10px 12px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12.5pt;
+  color: #9CCFD8;
+  box-shadow: none;
+}
+
+/* Code header row: uppercase done in widget code (no text-transform in GTK). */
+.code-header {
+  color: #6E6A86;
+  font-size: 8.5pt;
+  font-weight: 700;
+  padding: 2px 2px 6px 2px;
+}
+
+.code-copy {
+  background-color: rgba(57, 53, 82, 0.55);
+  border: 1px solid rgba(86, 82, 110, 0.7);
+  border-top-color: rgba(144, 140, 170, 0.4);
+  border-bottom-color: rgba(27, 25, 48, 0.8);
+  border-radius: 0;
+  padding: 3px 10px;
+  color: #908CAA;
+  font-size: 8.5pt;
+  font-weight: 600;
+  box-shadow: 0 1px 2px rgba(14, 12, 24, 0.5);
+}
+
+.code-copy:hover {
+  background-color: rgba(68, 65, 90, 0.7);
+  color: #E0DEF4;
+  box-shadow: 0 1px 2px rgba(14, 12, 24, 0.5),
+              0 0 8px rgba(156, 207, 216, 0.15);
+}
+
+.code-copy:active {
+  background-color: rgba(27, 25, 48, 0.6);
+  box-shadow: inset 0 1px 2px rgba(14, 12, 24, 0.6);
+}
+
+/* ── Syntax highlighting ──────────────────────────────────── */
+
+.syn-keyword   { color: #C4A7E7; font-weight: 600; }
+.syn-string    { color: #9CCFD8; }
+.syn-comment   { color: #6E6A86; font-style: italic; }
+.syn-number    { color: #F6C177; }
+.syn-type      { color: #3E8FB0; }
+.syn-function  { color: #EBBCBA; }
+.syn-attribute { color: #C4A7E7; font-style: italic; }
+.syn-plain     { color: #E0DEF4; }
+
+/* ── Tool & advisory cards ────────────────────────────────── */
+
+.tool-card {
+  background-color: #2A273F;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-left: 3px solid #3E8FB0;
+  border-radius: 0;
+  padding: 10px 12px;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5);
+}
+
+.tool-head {
+  color: #9CCFD8;
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+
+.tool-meta {
+  color: #6E6A86;
+  font-size: 9pt;
+}
+
+.advisory-card {
+  background-color: rgba(246, 193, 119, 0.08);
+  border: 1px solid rgba(246, 193, 119, 0.25);
+  border-top-color: rgba(246, 193, 119, 0.45);
+  border-left: 3px solid #F6C177;
+  border-radius: 0;
+  padding: 10px 12px;
+  color: #E0DEF4;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.4),
+              0 0 8px rgba(246, 193, 119, 0.08);
+}
+
+/* Severity variants (widget adds advisory-<severity>; later rules win). */
+.advisory-info {
+  background-color: rgba(62, 143, 176, 0.1);
+  border-color: rgba(62, 143, 176, 0.3);
+  border-top-color: rgba(62, 143, 176, 0.5);
+  border-left-color: #3E8FB0;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.4),
+              0 0 8px rgba(62, 143, 176, 0.1);
+}
+
+.advisory-error {
+  background-color: rgba(235, 111, 146, 0.1);
+  border-color: rgba(235, 111, 146, 0.3);
+  border-top-color: rgba(235, 111, 146, 0.5);
+  border-left-color: #EB6F92;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.4),
+              0 0 8px rgba(235, 111, 146, 0.1);
+}
+
+/* Tool-kind rail tints (widget adds tool-<kind>). */
+.tool-tool-use    { border-left-color: #3E8FB0; }
+.tool-tool-result { border-left-color: #9CCFD8; }
+.tool-thinking    { border-left-color: #C4A7E7; }
+
+/* Prose/bubble/advisory bodies are GtkTextViews — keep the glass visible. */
+.user-bubble textview,
+.user-bubble textview text,
+.assistant-message textview,
+.assistant-message textview text,
+.tool-card textview,
+.tool-card textview text,
+.advisory-card textview,
+.advisory-card textview text {
+  background-color: transparent;
+}
+
+/* ── Markdown / transcript elements ───────────────────────── */
+
+.md-h1 {
+  font-size: 17pt;
+  font-weight: 700;
+  color: #F6C177;
+  margin: 12px 0 6px 0;
+}
+
+.md-h2 {
+  font-size: 15pt;
+  font-weight: 700;
+  color: #F6C177;
+  margin: 10px 0 5px 0;
+}
+
+.md-h3 {
+  font-size: 13pt;
+  font-weight: 600;
+  color: #E0DEF4;
+  margin: 8px 0 4px 0;
+}
+
+.md-bold   { font-weight: 700; color: #F6C177; }
+.md-italic { font-style: italic; color: #E0DEF4; }
+
+.md-inline-code {
+  background-color: rgba(156, 207, 216, 0.12);
+  border-radius: 0;
+  padding: 1px 4px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12pt;
+  color: #9CCFD8;
+}
+
+.md-quote {
+  border-left: 3px solid rgba(246, 193, 119, 0.6);
+  padding: 4px 10px;
+  margin: 6px 0;
+  color: #908CAA;
+  font-style: italic;
+}
+
+.md-list {
+  padding-left: 18px;
+  color: #E0DEF4;
+}
+
+.md-link {
+  color: #C4A7E7;
+  text-decoration-line: underline;
+}
+
+/* ── Diff & terminal ──────────────────────────────────────── */
+
+.diff-add {
+  background-color: rgba(49, 116, 143, 0.35);
+  color: #9CCFD8;
+}
+
+.diff-remove {
+  background-color: rgba(235, 111, 146, 0.18);
+  color: #EB6F92;
+}
+
+.terminal {
+  background-color: #1F1D2E;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 10px 12px;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 10pt;
+  color: #E0DEF4;
+  box-shadow: inset 0 1px 3px rgba(14, 12, 24, 0.7);
+}
+
+/* ── Composer ─────────────────────────────────────────────── */
+
+.composer {
+  /* Lifted, near-opaque surface (Rosé Pine highlight) so the composer reads
+     as a clearly raised card against the dark background — the dark analogue
+     of the light theme's white-on-cream input. */
+  background-color: rgba(68, 65, 90, 0.96);
+  border: 1px solid rgba(110, 106, 134, 0.9);
+  border-top-color: rgba(167, 162, 190, 0.85);
+  border-bottom-color: rgba(27, 25, 48, 0.9);
+  border-radius: 0;
+  padding: 8px 12px;
+  margin: 10px 12px;
+  box-shadow: 0 2px 6px rgba(14, 12, 24, 0.55),
+              0 0 8px rgba(246, 193, 119, 0.06);
+}
+
+.composer:focus-within {
+  border-color: rgba(246, 193, 119, 0.55);
+  box-shadow: 0 2px 6px rgba(14, 12, 24, 0.55),
+              0 0 12px rgba(246, 193, 119, 0.18);
+}
+
+.composer-view,
+.composer-view text {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #E0DEF4;
+  caret-color: #F6C177;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 10.5pt;
+}
+
+/* Wrapping composer: the scrolled window draws nothing itself. */
+.composer scrolledwindow,
+.composer scrolledwindow viewport {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+}
+
+.attachment-strip {
+  padding: 2px 0;
+}
+
+.attachment-chip {
+  background-color: rgba(64, 61, 88, 0.9);
+  border: 1px solid rgba(110, 106, 134, 0.8);
+  border-radius: 4px;
+  padding: 4px 6px;
+}
+
+.chip-name {
+  color: #908CAA;
+  font-size: 9pt;
+}
+
+.chip-remove {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #6E6A86;
+  padding: 2px 6px;
+}
+
+.chip-remove:hover {
+  color: #EB6F92;
+}
+
+.queue-strip {
+  padding: 0;
+}
+
+.queue-chip {
+  color: #908CAA;
+  font-size: 9pt;
+}
+
+.stop-button,
+.queue-button {
+  background-color: transparent;
+  color: #E0DEF4;
+  border: 1px solid rgba(110, 106, 134, 0.9);
+  border-radius: 0;
+  padding: 4px 10px;
+  font-weight: 600;
+}
+
+.stop-button:hover,
+.queue-button:hover {
+  border-color: rgba(246, 193, 119, 0.55);
+  color: #F6C177;
+}
+
+/* Transcript image previews (artifact rows + preview captures). */
+.transcript-image {
+  border: 1px solid rgba(110, 106, 134, 0.6);
+  border-radius: 4px;
+  margin: 4px 0;
+}
+
+/* Files pane thumbnails. */
+.file-thumb {
+  border-radius: 3px;
+}
+
+/* Click-to-zoom lightbox: dark wash over the whole window. */
+.lightbox-backdrop {
+  background-color: rgba(21, 20, 36, 0.85);
+}
+
+/* Copy chrome: hover-revealed ghost button + right-click menu. */
+.copy-ghost {
+  background-color: rgba(57, 53, 82, 0.85);
+  border: 1px solid rgba(86, 82, 110, 0.7);
+  border-radius: 4px;
+  box-shadow: none;
+  color: #908CAA;
+  padding: 1px 6px;
+  margin: 4px;
+}
+
+.copy-ghost:hover {
+  color: #E0DEF4;
+  border-color: rgba(246, 193, 119, 0.55);
+}
+
+.copy-menu {
+  background-color: rgba(38, 35, 58, 0.98);
+  border: 1px solid rgba(86, 82, 110, 0.8);
+  border-radius: 6px;
+  padding: 4px;
+}
+
+.copy-menu-item {
+  background-color: transparent;
+  border: none;
+  box-shadow: none;
+  color: #E0DEF4;
+  padding: 6px 14px;
+  border-radius: 4px;
+}
+
+.copy-menu-item:hover {
+  background-color: rgba(68, 65, 90, 0.9);
+  color: #F6C177;
+}
+
+.send-button {
+  background-color: #F6C177;
+  color: #232136;
+  border: 1px solid #E8AE5F;
+  border-top-color: #F8CE90;
+  border-bottom-color: #D99A45;
+  border-radius: 0;
+  padding: 4px 12px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5),
+              0 0 6px rgba(246, 193, 119, 0.25);
+}
+
+.send-button:hover {
+  background-color: #F8CE90;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5),
+              0 0 10px rgba(246, 193, 119, 0.4);
+}
+
+.send-button:active {
+  background-color: #E8AE5F;
+  box-shadow: inset 0 1px 2px rgba(27, 25, 48, 0.4);
+}
+
+/* ── Cards & text roles ───────────────────────────────────── */
+
+.card {
+  background-color: #2A273F;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 12px;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5);
+}
+
+.muted  { color: #6E6A86; }
+.subtle { color: #908CAA; }
+.accent { color: #F6C177; }
+
+/* ── Scrolled windows ─────────────────────────────────────── */
+
+scrolledwindow {
+  background-color: transparent;
+}
+
+scrollbar slider {
+  background-color: #56526E;
+  border-radius: 0;
+  min-width: 6px;
+}
+
+scrollbar slider:hover {
+  background-color: #6E6A86;
+}
+
+/* Flat glyph buttons (toggles) — no box until hover (retro-2005 toolbar). */
+.flat-btn {
+  background: transparent;
+  border: none;
+  border-radius: 0;
+  padding: 2px 7px;
+  color: #6E6A86;
+  font-weight: 500;
+  box-shadow: none;
+}
+.flat-btn:hover {
+  background: rgba(57,53,82,0.55);
+  color: #E0DEF4;
+}
+.flat-btn:active {
+  background: rgba(57,53,82,0.55);
+}
+
+/* Slim top bar: no card chrome, aligned with the sidebar header rows. */
+.topbar {
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid #393552;
+  padding: 2px 6px;
+  min-height: 0;
+}
+.topbar-title {
+  color: #FFFFFF;
+  font-weight: 600;
+  font-size: 17px;
+}
+
+/* Collapsible card headers (click to expand). */
+.card-header {
+  background: transparent;
+  border: none;
+  padding: 3px 8px;
+  min-height: 0;
+  color: #6E6A86;
+  font-weight: 600;
+  font-size: 9pt;
+}
+.card-header:hover { background: rgba(57,53,82,0.55); color: #E0DEF4; }
+.card-chevron { color: #6E6A86; font-size: 9pt; }
+.tool-card.collapsed, .code-block.collapsed, .advisory-card.collapsed { padding-bottom: 0; }
+
+/* ── First-run onboarding (login screen) ──────────────────── */
+
+/* Full-window dim backdrop over the workspace. */
+.onboarding {
+  background-color: rgba(35, 33, 54, 0.93);
+}
+
+.login-card {
+  background-color: #2A273F;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 28px 32px;
+  box-shadow: 0 4px 18px rgba(14, 12, 24, 0.6),
+              0 0 12px rgba(246, 193, 119, 0.07);
+}
+
+.login-title {
+  color: #FFFFFF;
+  font-size: 19pt;
+  font-weight: 700;
+}
+
+.login-subtle {
+  color: #908CAA;
+  font-size: 10pt;
+}
+
+.login-entry,
+.login-entry text {
+  background-color: rgba(57, 53, 82, 0.55);
+  border: 1px solid rgba(86, 82, 110, 0.7);
+  border-top-color: rgba(144, 140, 170, 0.45);
+  border-radius: 0;
+  padding: 8px 12px;
+  color: #E0DEF4;
+  caret-color: #F6C177;
+  font-family: "Fira Sans", "Helvetica Neue", sans-serif;
+  font-size: 11pt;
+}
+
+.login-entry placeholder {
+  color: #6E6A86;
+}
+
+.login-button {
+  background-color: #F6C177;
+  color: #232136;
+  border: 1px solid #E8AE5F;
+  border-top-color: #F8CE90;
+  border-bottom-color: #D99A45;
+  border-radius: 0;
+  padding: 7px 14px;
+  font-weight: 600;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5),
+              0 0 6px rgba(246, 193, 119, 0.25);
+}
+
+.login-button:hover {
+  background-color: #F8CE90;
+  box-shadow: 0 1px 3px rgba(14, 12, 24, 0.5),
+              0 0 10px rgba(246, 193, 119, 0.4);
+}
+
+.login-button:active {
+  background-color: #E8AE5F;
+  box-shadow: inset 0 1px 2px rgba(27, 25, 48, 0.4);
+}
+
+.login-button:disabled {
+  background-color: #56526E;
+  color: #908CAA;
+  border-color: #393552;
+  box-shadow: none;
+}
+
+.login-error {
+  color: #EB6F92;
+  font-size: 10pt;
+}
+
+/* ── Settings popover (plain-language toggles) ────────────── */
+
+.settings-popover {
+  background-color: #2A273F;
+  border: 1px solid #393552;
+  border-radius: 0;
+  padding: 10px 14px;
+}
+
+.settings-popover checkbutton {
+  color: #E0DEF4;
+  font-size: 10.5pt;
+  padding: 4px 2px;
+}
+
+.settings-popover check {
+  background-color: #2A273F;
+  border: 1px solid #6E6A86;
+  border-radius: 0;
+  min-width: 14px;
+  min-height: 14px;
+}
+
+.settings-popover check:checked {
+  background-color: #F6C177;
+  border-color: #E8AE5F;
+}
+
+.settings-popover check:checked image {
+  color: #232136;
+}
+
+/* Rail search + grouping + section headers */
+.rail-search {
+  background-color: rgba(35, 33, 54, 0.7);
+  border: 1px solid rgba(86, 82, 110, 0.5);
+  color: #E0DEF4;
+  caret-color: #F6C177;
+  margin: 4px 10px;
+  padding: 3px 8px;
+  min-height: 0;
+  font-size: 9.5pt;
+}
+.rail-section {
+  color: #F6C177;
+  font-size: 8.5pt;
+  font-weight: bold;
+  letter-spacing: 1px;
+  padding: 8px 12px 2px 12px;
+  text-transform: uppercase;
+}
+
+/* Segmented grouping control: Recent / Project */
+.rail-segmented {
+  margin: 0 10px 6px 10px;
+  background-color: rgba(35, 33, 54, 0.7);
+  border: 1px solid rgba(86, 82, 110, 0.5);
+  border-radius: 6px;
+}
+.rail-segment {
+  background-color: transparent;
+  border: none;
+  color: #908CAA;
+  padding: 3px 0;
+  min-height: 0;
+  font-size: 8.5pt;
+}
+.rail-segment-active {
+  /* Active = gold label + weight, no fill slab (the filled pill read as
+     generic UI; the accent color carries "selected" on its own). */
+  color: #F6C177;
+  font-weight: 600;
+}
+
+/* Card header button: strip button chrome so it reads as a plain row that
+   happens to be clickable (activation, not a visible button). */
+.card-header-btn {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  margin: 0;
+  min-height: 0;
+}
+.card-header-btn:hover { background: transparent; }
+
+/* Text selection: visible translucent iris wash, text keeps its color. */
+selection {
+  background-color: rgba(144, 122, 169, 0.35);
+  color: #E0DEF4;
+}
+
+/* Resizable sidebar drag handles (rail + panes). The strip stays visible when
+   the rail is collapsed so a drag from the left edge reopens it. */
+.pane-divider {
+  min-width: 6px;
+  background-color: transparent;
+}
+.pane-divider:hover {
+  background-color: rgba(154, 140, 220, 0.35);
+}
+
+/* ── Cascade additions (question card, inbox, plan, toasts, pills) ── */
+
+/* Question / approval card floating above the composer. */
+.question-card {
+  background-color: #2A273F;
+  border: 1.5px solid #E0DEF4;
+  border-radius: 0;
+  padding: 12px 14px;
+  margin: 0 12px;
+  box-shadow: 0 2px 10px rgba(14, 12, 24, 0.6);
+}
+.question-title {
+  color: #E0DEF4;
+  font-size: 15px;
+  font-weight: 600;
+}
+.question-body { color: #E0DEF4; font-size: 10.5pt; }
+.question-option {
+  background-color: transparent;
+  border: 1px solid #393552;
+  border-radius: 0;
+  box-shadow: none;
+  color: #E0DEF4;
+  padding: 6px 10px;
+  font-size: 10.5pt;
+}
+.question-option:hover {
+  background-color: #EB6F92;
+  border-color: #EB6F92;
+  color: #232136;
+}
+.allow-btn {
+  background-color: #3E8FB0;
+  color: #232136;
+  border: 1px solid #31748F;
+  border-radius: 0;
+  padding: 4px 14px;
+  font-weight: 600;
+  font-size: 9.5pt;
+}
+.allow-btn:hover { background-color: #4EA3C4; }
+.deny-btn {
+  background-color: #EB6F92;
+  color: #232136;
+  border: 1px solid #C85D7D;
+  border-radius: 0;
+  padding: 4px 14px;
+  font-weight: 600;
+  font-size: 9.5pt;
+}
+.deny-btn:hover { background-color: #F083A3; }
+.question-timeout { color: #6E6A86; font-size: 9pt; }
+
+/* Inbox badge + dropdown. */
+.inbox-badge {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 2px 7px;
+  color: #EB6F92;
+  font-weight: 700;
+  font-size: 9.5pt;
+}
+.inbox-badge:hover { background: rgba(235, 111, 146, 0.14); }
+.inbox-popover {
+  background-color: #2A273F;
+  border: 1px solid #393552;
+  border-radius: 0;
+  padding: 6px;
+}
+.inbox-item {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #E0DEF4;
+  padding: 6px 10px;
+  font-size: 10pt;
+}
+.inbox-item:hover { background-color: rgba(57, 53, 82, 0.55); }
+.inbox-empty { color: #6E6A86; font-size: 9.5pt; padding: 8px 12px; }
+
+/* Topbar status + model pill. */
+.status-label { color: #FFFFFF; font-weight: 600; font-size: 10.5pt; }
+.model-pill {
+  color: #908CAA;
+  font-size: 8.5pt;
+  font-weight: 600;
+  border: 1px solid #393552;
+  border-radius: 0;
+  padding: 1px 8px;
+}
+
+/* Plan slide-over. */
+.plan-panel {
+  background-color: #2A273F;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 10px 12px;
+  margin: 10px 10px 10px 0;
+  box-shadow: 0 2px 8px rgba(14, 12, 24, 0.5);
+}
+.plan-phase { color: #9CCFD8; font-weight: 700; font-size: 9.5pt; margin-top: 4px; }
+.plan-task { color: #E0DEF4; font-size: 10pt; }
+.plan-task.completed { color: #6E6A86; }
+.plan-task.in-progress { color: #F6C177; }
+.plan-task.blocked, .plan-task.abandoned { color: #EB6F92; }
+
+/* Toast. */
+.toast {
+  background-color: rgba(224, 222, 244, 0.92);
+  color: #232136;
+  border-radius: 0;
+  padding: 6px 14px;
+  margin-top: 8px;
+  font-size: 9.5pt;
+}
+
+/* Composer hint line. */
+.composer-hint { color: #56526E; font-size: 8.5pt; }
+
+/* Rail row extras. */
+.rail-row-title { color: #E0DEF4; font-size: 10pt; font-weight: 600; }
+.rail-row-sub { color: #6E6A86; font-size: 8.5pt; }
+.rail-status { color: #6E6A86; font-size: 8pt; font-weight: 700; }
+.rail-status.active { color: #F6C177; }
+.context-bar trough {
+  background-color: rgba(57, 53, 82, 0.8);
+  min-height: 3px;
+  border-radius: 0;
+}
+.context-bar progress {
+  background-color: #9CCFD8;
+  min-height: 3px;
+  border-radius: 0;
+}
+
+/* Code/prose bodies are GtkTextViews — keep surfaces visible. */
+.code-block textview, .code-block textview text,
+.prose textview, .prose textview text,
+.composer-view textview, .composer-view textview text {
+  background-color: transparent;
+}
+
+/* "Use locally without account" link. */
+.login-link {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  color: #C4A7E7;
+  text-decoration-line: underline;
+  padding: 2px 4px;
+  font-size: 9.5pt;
+}
+.login-link:hover { color: #EB6F92; }
+
+/* Attachment chip thumb + lightbox. */
+.lightbox {
+  background-color: rgba(21, 20, 36, 0.92);
+}
