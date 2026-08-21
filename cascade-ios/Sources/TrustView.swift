@@ -63,30 +63,9 @@ struct TrustLive: View {
             Text("MODEL").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.horizontal, 20).padding(.bottom, 10)
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    if client.enhanced && !client.models.isEmpty {
-                        Menu {
-                            ForEach(client.models) { m in
-                                Button(m.name) { Task { _ = await client.setModel(m.modelId) } }
-                            }
-                        } label: {
-                            HStack(spacing: 6) {
-                                Text(client.modelName).font(.term(15)).foregroundStyle(t.txt).lineLimit(1)
-                                Image(systemName: "chevron.up.chevron.down").font(.system(size: 11)).foregroundStyle(t.txtMuted)
-                            }
-                        }
-                    } else {
-                        Text(client.modelName).font(.term(15)).foregroundStyle(t.txt).lineLimit(1)
-                    }
+                    Text(client.modelName).font(.term(15)).foregroundStyle(t.txt).lineLimit(1)
                     Spacer()
-                    if client.enhanced && !client.thinkingLevels.isEmpty {
-                        Menu {
-                            ForEach(client.thinkingLevels, id: \.self) { lvl in
-                                Button(lvl) { Task { _ = await client.setThinking(lvl) } }
-                            }
-                        } label: { Chip(t: t, text: client.thinkingLevel, on: true) }
-                    } else {
-                        Chip(t: t, text: client.thinkingLevel, on: true)
-                    }
+                    Chip(t: t, text: client.thinkingLevel, on: true)
                 }
                 if let pct = client.contextPercent {
                     VStack(alignment: .leading, spacing: 5) {
