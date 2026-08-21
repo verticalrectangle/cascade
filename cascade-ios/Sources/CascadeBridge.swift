@@ -82,7 +82,7 @@ enum Wire {
         if let model { o["model"] = model }
         return body(o)
     }
-    private static func body(_ o: [String: Any]) -> String {
+    static func body(_ o: [String: Any]) -> String {
         guard let d = try? JSONSerialization.data(withJSONObject: o), let s = String(data: d, encoding: .utf8) else { return "{}" }
         return s
     }
@@ -380,8 +380,6 @@ final class CascadeClient: ObservableObject {
                         self.applyFrameJSON(s)
                     case .data(let d):
                         if let s = String(data: d, encoding: .utf8) { self.applyFrameJSON(s) }
-                    case .close:
-                        break
                     @unknown default:
                         break
                     }
@@ -756,7 +754,7 @@ final class CascadeClient: ObservableObject {
 
     private func messageId(_ m: [String: Any]) -> String {
         if let id = m["id"] as? String { return id }
-        return "msg-\(m.hashValue)"
+        return "msg-\(ObjectIdentifier(m as AnyObject).hashValue)"
     }
 
     private func userTurn(id: String, content: Any?) -> UITurn {
