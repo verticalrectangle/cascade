@@ -139,8 +139,6 @@ final class CascadeClient: ObservableObject {
     private var terminated = false        // deliberate end (leave/bye/process exit) — never reconnect
     private var reconnectAttempt = 0
     private var reconnectTask: Task<Void, Never>?
-
-    @Published private(set) var commands: [CascadeCommand] = []
     private var messages: [[String: Any]] = []   // finalized AgentMessages (omp shape, verbatim)
     private var streamText = ""
     private var streamThinking = ""
