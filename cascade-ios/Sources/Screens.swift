@@ -190,6 +190,18 @@ struct LoginGate: View {
             }
         }
         .preferredColorScheme(theme.preferredScheme)
+        .task {
+            // Dev seam (mirrors the old ENCLAVE_COLLAB_LINK): auto-sign-in for sim
+            // testing via SIMCTL_CHILD_CASCADE_HOST / _CASCADE_EMAIL / _CASCADE_PASSWORD.
+            guard app.account == nil, !busy,
+                  let h = ProcessInfo.processInfo.environment["CASCADE_HOST"],
+                  let e = ProcessInfo.processInfo.environment["CASCADE_EMAIL"],
+                  let p = ProcessInfo.processInfo.environment["CASCADE_PASSWORD"] else { return }
+            host = h; email = e
+            busy = true; error = nil
+            error = await app.signIn(base: h, email: e, password: p)
+            busy = false
+        }
     }
 
     private func field(icon: String, placeholder: String, text: Binding<String>,
