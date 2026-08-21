@@ -138,7 +138,7 @@ private struct RingMark: View {
                     .scaleEffect(on ? 1.9 : 1).opacity(on ? 0 : 0.6)
                     .animation(.easeOut(duration: 1.8).repeatForever(autoreverses: false), value: on)
             }
-            EnclaveSlit().stroke(style: StrokeStyle(lineWidth: s * 0.065, lineCap: .round, lineJoin: .round))
+            CascadeSlit().stroke(style: StrokeStyle(lineWidth: s * 0.065, lineCap: .round, lineJoin: .round))
         }
         .frame(width: size, height: size)
         .onAppear { if pulse { on = true } }
