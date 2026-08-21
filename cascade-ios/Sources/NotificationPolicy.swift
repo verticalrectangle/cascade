@@ -43,15 +43,15 @@ final class NotificationPolicy {
             scheduleDone(c)
         }
         wasWorking = c.working
-        // Host ask — once per (session, reqId), immediately when away (no debounce).
-        if let ask = c.turns.last(where: { $0.type == .ask }), let rq = ask.reqId {
-            let key = "\(c.sessionId)-\(rq)"
+        // Host ask — once per (session, reqKey), immediately when away (no debounce).
+        if let ask = c.turns.last(where: { $0.type == .ask }), !ask.reqKey.isEmpty {
+            let key = "\(c.sessionId)-\(ask.reqKey)"
             if !notifiedAsks.contains(key) {
                 notifiedAsks.insert(key)
                 if away {
                     Notifier.post(title: c.title.isEmpty ? "session" : c.title,
-                                  body: ask.question.isEmpty ? "The host is asking for your input." : ask.question,
-                                  id: "ask-\(rq)")
+                                  body: ask.question.isEmpty ? "The daemon is asking for your input." : ask.question,
+                                  id: "ask-\(ask.reqKey)")
                 }
             }
         }
