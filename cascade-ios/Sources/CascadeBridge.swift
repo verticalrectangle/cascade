@@ -69,11 +69,13 @@ enum Wire {
         body(["kind": "prompt", "message": text])
     }
     static func abort() -> String { body(["kind": "abort"]) }
-    static func answer(requestId: String, value: String?, confirmed: Bool? = nil) -> String {
+    static func answer(requestId: String, value: String? = nil, confirmed: Bool? = nil) -> String {
         var response: [String: Any] = [:]
         if let value { response["value"] = value }
         if let confirmed { response["confirmed"] = confirmed }
-        if value == nil && confirmed == nil { return body(["kind": "answer_ui", "request_id": requestId, "response": "cancelled"]) }
+        if value == nil && confirmed == nil {
+            return body(["kind": "answer_ui", "request_id": requestId, "response": "cancelled"])
+        }
         return body(["kind": "answer_ui", "request_id": requestId, "response": response])
     }
     static func createSession(machine: String?, cwd: String, model: String?) -> String {
