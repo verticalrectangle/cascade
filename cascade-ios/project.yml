@@ -1,0 +1,43 @@
+name: Cascade
+options:
+  bundleIdPrefix: xyz.epsilver
+  deploymentTarget:
+    iOS: "26.0"
+targets:
+  Cascade:
+    type: application
+    platform: iOS
+    sources:
+      - Sources
+      - Shared
+      - Resources
+    dependencies:
+      - target: CascadeWidgets
+        embed: true
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: xyz.epsilver.cascade
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Cascade-Info.plist
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: YES
+  CascadeWidgets:
+    type: app-extension
+    platform: iOS
+    sources:
+      - WidgetSources
+      - Shared
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: xyz.epsilver.cascade.widgets
+        MARKETING_VERSION: "1.0"
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: CascadeWidgets-Info.plist
+        SWIFT_VERSION: "5.0"
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGNING_ALLOWED: YES
