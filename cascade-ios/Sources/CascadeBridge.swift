@@ -148,7 +148,7 @@ final class CascadeClient: ObservableObject {
     private var activeTools: [(id: String, tool: [String: Any])] = []
     private var pendingRequest: CascadeUiRequest?
     private var pendingSends: Set<String> = []   // optimistic prompts awaiting echo
-    private var plan: [PlanPhase] = []
+    @Published private(set) var plan: [PlanPhase] = []
     @Published private(set) var welcomed = false
     @Published private(set) var goal: GoalInfo?
     @Published private(set) var activity: String?

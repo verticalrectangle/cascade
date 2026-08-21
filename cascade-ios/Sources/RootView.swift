@@ -60,15 +60,18 @@ final class AppModel: ObservableObject {
         }
     }
 
+
     /// Pull GET /sessions into the local card list.
     func refreshSessions() async {
         guard let account else { return }
         do {
             let metas = try await CascadeClient.listSessions(account: account)
             var next: [JoinedSession] = metas.map { m in
-                JoinedSession(
+                let dirName = (m.cwd as NSString).lastPathComponent
+                return JoinedSession(
                     id: m.id,
-                    title: m.name ?? ((m.cwd as NSString).lastPathComponent.isEmpty ? "session" : (m.cwd as NSString).lastPathComponent),
+                    link: m.id,
+                    title: m.name ?? (dirName.isEmpty ? "session" : dirName),
                     relay: m.machine,
                     readOnly: false,
                     savedAt: m.last_active ?? m.created_at ?? .distantPast,
@@ -84,7 +87,6 @@ final class AppModel: ObservableObject {
             signOut()
         }
     }
-
     /// Attach to a session (from the directory or a fresh spawn).
     @discardableResult
     func connect(sessionId: String, paired: Bool = false) -> Bool {

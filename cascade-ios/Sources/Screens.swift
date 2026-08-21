@@ -158,7 +158,7 @@ struct LoginGate: View {
                         .padding(.bottom, 10)
                     field(icon: "envelope", placeholder: "email", text: $email, keyboard: .emailAddress)
                         .padding(.bottom, 10)
-                    SecureField("", prompt: Text("password").foregroundStyle(t.txtMuted), text: $password)
+                    SecureField("", text: $password, prompt: Text("password").foregroundStyle(t.txtMuted))
                         .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true)
@@ -196,7 +196,7 @@ struct LoginGate: View {
                        keyboard: UIKeyboardType = .default, error: Bool = false) -> some View {
         HStack(spacing: 8) {
             Image(systemName: icon).font(.system(size: 15)).foregroundStyle(t.txtMuted)
-            TextField("", prompt: Text(placeholder).foregroundStyle(t.txtMuted), text: text)
+            TextField("", text: text, prompt: Text(placeholder).foregroundStyle(t.txtMuted))
                 .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
                 .keyboardType(keyboard).textInputAutocapitalization(.never).autocorrectionDisabled()
         }
@@ -230,13 +230,13 @@ struct SpawnView: View {
                         .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 22)
 
                     Text("WORKING DIRECTORY").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
-                    TextField("", prompt: Text("path on the daemon machine").foregroundStyle(t.txtMuted), text: $cwd)
+                    TextField("", text: $cwd, prompt: Text("path on the daemon machine").foregroundStyle(t.txtMuted))
                         .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 14)
 
                     Text("MODEL — OPTIONAL").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
-                    TextField("", prompt: Text("provider/model id").foregroundStyle(t.txtMuted), text: $model)
+                    TextField("", text: $model, prompt: Text("provider/model id").foregroundStyle(t.txtMuted))
                         .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 8)
