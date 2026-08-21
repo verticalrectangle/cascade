@@ -23,6 +23,13 @@ pub enum CloudCommand {
     Prompt { message: String },
     Abort,
     AnswerUi { request_id: String, response: UiAnswer },
+    /// Switch the session's model. `model_id` excludes the provider.
+    SetModel { provider: String, model_id: String },
+    /// Switch the thinking level (e.g. "off" | "minimal" | "low" | "medium" | "high").
+    SetThinking { level: String },
+    /// Ask the daemon to re-emit session state (model/thinking/etc.) as a
+    /// `state_changed` event on this stream.
+    GetState,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

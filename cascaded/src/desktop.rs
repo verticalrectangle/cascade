@@ -226,6 +226,13 @@ async fn dispatch_envelope(sessions: &SessionManager, text: &str) {
             CloudCommand::AnswerUi { request_id, response } => {
                 session.answer_ui(request_id, response).await
             }
+            CloudCommand::SetModel { provider, model_id } => {
+                session.set_model(provider, model_id).await
+            }
+            CloudCommand::SetThinking { level } => session.set_thinking_level(level).await,
+            // Desktop role has no stream socket to answer on; state is pushed
+            // by the normal StateChanged subscription path.
+            CloudCommand::GetState => Ok(()),
         };
         if let Err(e) = result {
             tracing::warn!(%e, session_id = id, "relay command failed");

@@ -242,6 +242,35 @@ async fn handle_stream(
                                     tracing::warn!(%e, "answer_ui failed");
                                 }
                             }
+                            Ok(CloudCommand::SetModel { provider, model_id }) => {
+                                if let Err(e) = session.set_model(provider, model_id).await {
+                                    tracing::warn!(%e, "set_model failed");
+                                }
+                            }
+                            Ok(CloudCommand::SetThinking { level }) => {
+                                if let Err(e) = session.set_thinking_level(level).await {
+                                    tracing::warn!(%e, "set_thinking failed");
+                                }
+                            }
+                            Ok(CloudCommand::GetState) => match session.get_state().await {
+                                Ok(state) => {
+                                    let frame = cascade_core::SessionEvent::StateChanged;
+                                    // Re-emit the full state payload alongside the event so
+                                    // thin clients don't need a separate REST round-trip.
+                                    let mut ev = serde_json::to_value(&frame)
+                                        .unwrap_or(serde_json::Value::Null);
+                                    if let Some(map) = ev.as_object_mut() {
+                                        map.insert(
+                                            "state".into(),
+                                            serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
+                                        );
+                                    }
+                                    if let Ok(text) = serde_json::to_string(&ev) {
+                                        let _ = sink.send(Message::Text(text.into())).await;
+                                    }
+                                }
+                                Err(e) => tracing::warn!(%e, "get_state failed"),
+                            },
                             Err(e) => {
                                 tracing::warn!(%e, "invalid CloudCommand");
                             }
