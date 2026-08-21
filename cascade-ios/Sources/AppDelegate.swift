@@ -8,9 +8,10 @@ final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCent
                      didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
         if ProcessInfo.processInfo.environment["CASCADE_SCREENSHOT"] != "1" {
             UNUserNotificationCenter.current().requestAuthorization(options: [.alert, .sound, .badge]) { _, _ in }
+            // Scaffold for a future daemon→APNs bridge: register and forward the
+            // token. (Triggers a system prompt on Xcode 26+ sims — hence the gate.)
+            application.registerForRemoteNotifications()
         }
-        // Scaffold for a future daemon→APNs bridge: register and forward the token.
-        application.registerForRemoteNotifications()
         UNUserNotificationCenter.current().delegate = self
         return true
     }
