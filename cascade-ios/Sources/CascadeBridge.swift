@@ -472,7 +472,7 @@ final class CascadeClient: ObservableObject {
             if !provider.isEmpty { providerName = provider }
             if !name.isEmpty { modelName = name }
         }
-        if let lvl = st["thinking_level"] as? String { thinkingLevel = lvl }
+        if let lvl = st["thinkingLevel"] as? String { thinkingLevel = lvl }
     }
 
     private func applyFrameJSON(_ s: String) {
