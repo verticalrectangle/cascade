@@ -42,6 +42,7 @@
 //! `SessionManager::shutdown_all`.
 
 mod auth;
+mod auth_register;
 mod bandwidth;
 mod desktop;
 mod relay;
@@ -143,10 +144,12 @@ impl Config {
                 "bind" => bind = val.ok_or_else(|| anyhow::anyhow!("--bind needs a value"))?,
                 "db" => db = val.ok_or_else(|| anyhow::anyhow!("--db needs a value"))?,
                 "jwt-secret" => {
-                    jwt_secret = Some(val.ok_or_else(|| anyhow::anyhow!("--jwt-secret needs a value"))?)
+                    jwt_secret =
+                        Some(val.ok_or_else(|| anyhow::anyhow!("--jwt-secret needs a value"))?)
                 }
                 "cloud-url" => {
-                    cloud_url = Some(val.ok_or_else(|| anyhow::anyhow!("--cloud-url needs a value"))?)
+                    cloud_url =
+                        Some(val.ok_or_else(|| anyhow::anyhow!("--cloud-url needs a value"))?)
                 }
                 "machine-name" => {
                     machine_name =
@@ -160,7 +163,8 @@ impl Config {
                     allow = val.ok_or_else(|| anyhow::anyhow!("--allow-passwords needs a value"))?
                 }
                 "terminal-token" => {
-                    terminal_token = val.ok_or_else(|| anyhow::anyhow!("--terminal-token needs a value"))?
+                    terminal_token =
+                        val.ok_or_else(|| anyhow::anyhow!("--terminal-token needs a value"))?
                 }
                 other => anyhow::bail!("unknown flag --{other}"),
             }
@@ -243,7 +247,10 @@ async fn main() -> anyhow::Result<()> {
     }
 }
 
-async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>) -> anyhow::Result<()> {
+async fn run_cloud(
+    cfg: Config,
+    mut shutdown: tokio::sync::watch::Receiver<bool>,
+) -> anyhow::Result<()> {
     if let Some(parent) = cfg.db.parent() {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(parent)?;
@@ -254,13 +261,24 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
         let conn = rusqlite::Connection::open(&cfg.db)?;
         auth::init_tables(&conn)?;
         auth::seed_if_empty(&conn, &cfg.allow_passwords)?;
+        auth::promote_seeded_admins(&conn, &cfg.allow_passwords)?;
         relay::init_tables(&conn)?;
         terminal::init_tables(&conn)?;
+        routes::init_share_tables(&conn)?;
+        auth_register::init_invites(&conn)?;
     }
 
     let registry = SessionRegistry::open(&cfg.db)?;
     let sessions = SessionManager::new(registry);
     let relay = RelayRouter::new(cfg.db.clone())?;
+
+    {
+        let conn = rusqlite::Connection::open(&cfg.db)?;
+        if let Some(uid) = auth::seeded_uid(&conn, &cfg.allow_passwords) {
+            auth::assign_unowned(&conn, &uid)?;
+            relay::backfill_machine_tokens(&conn)?;
+        }
+    }
 
     let state = AppState {
         jwt_secret: cfg.jwt_secret.clone(),
@@ -272,13 +290,27 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
 
     let app = Router::new()
         .route("/auth/login", post(auth::login))
+        .route("/auth/register", post(auth_register::register))
+        .route("/invites", post(auth_register::mint_invite))
         .route("/machines", get(routes::list_machines))
+        .route("/machines/token", post(routes::mint_machine_token))
+        .route(
+            "/machines/{id}",
+            axum::routing::delete(routes::delete_machine),
+        )
         .route(
             "/sessions",
             get(routes::list_sessions).post(routes::create_session),
         )
-        .route("/sessions/{id}", axum::routing::delete(routes::delete_session))
+        .route(
+            "/sessions/{id}",
+            axum::routing::delete(routes::delete_session),
+        )
         .route("/sessions/{id}/stream", get(routes::session_stream))
+        .route(
+            "/sessions/{id}/share",
+            post(routes::create_share).delete(routes::delete_share),
+        )
         .route("/relay", get(relay::relay_ws))
         .route(
             "/register-terminal",
@@ -291,11 +323,14 @@ async fn run_cloud(cfg: Config, mut shutdown: tokio::sync::watch::Receiver<bool>
     let listener = tokio::net::TcpListener::bind(cfg.bind).await?;
     tracing::info!(bind = %cfg.bind, db = %cfg.db.display(), "cascaded cloud listening");
 
-    axum::serve(listener, app)
-        .with_graceful_shutdown(async move {
-            let _ = shutdown.changed().await;
-        })
-        .await?;
+    axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(async move {
+        let _ = shutdown.changed().await;
+    })
+    .await?;
 
     sessions.shutdown_all().await;
     Ok(())

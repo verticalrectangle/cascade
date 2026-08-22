@@ -723,6 +723,7 @@ impl SessionManager {
             join_handle: None,
             view_handle: None,
             pid: None,
+            owner: String::new(),
         };
         if let Ok(state) = session.get_state().await {
             meta.omp_session_id = if state.session_id.is_empty() {

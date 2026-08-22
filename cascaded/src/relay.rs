@@ -76,7 +76,9 @@ struct RelayEnvelope {
 
 impl RelayEnvelope {
     fn text(&self) -> Option<Message> {
-        serde_json::to_string(self).ok().map(|s| Message::Text(s.into()))
+        serde_json::to_string(self)
+            .ok()
+            .map(|s| Message::Text(s.into()))
     }
 }
 
@@ -116,12 +118,14 @@ impl RelayRouter {
         })
     }
 
-    pub async fn list_machines_async(&self) -> anyhow::Result<Vec<MachineInfo>> {
+    pub async fn list_machines_async(&self, owner: &str) -> anyhow::Result<Vec<MachineInfo>> {
         let db_path = self.db_path.clone();
+        let owner = owner.to_string();
         let rows = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<(String, String)>> {
             let conn = Connection::open(&db_path)?;
-            let mut stmt = conn.prepare("SELECT id, name FROM machines ORDER BY name")?;
-            let mapped = stmt.query_map([], |row| {
+            let mut stmt =
+                conn.prepare("SELECT id, name FROM machines WHERE owner = ?1 ORDER BY name")?;
+            let mapped = stmt.query_map(rusqlite::params![owner], |row| {
                 Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
             })?;
             let mut v = Vec::new();
@@ -149,11 +153,12 @@ impl RelayRouter {
     }
 
     /// Desktop-hosted sessions known to the cloud (cache of desktop spawns).
-    pub fn list_machine_sessions(&self) -> anyhow::Result<Vec<MachineSession>> {
+    pub fn list_machine_sessions(&self, owner: &str) -> anyhow::Result<Vec<MachineSession>> {
         let conn = Connection::open(&self.db_path)?;
-        let mut stmt =
-            conn.prepare("SELECT id, machine, cwd, created_at FROM machine_sessions ORDER BY created_at DESC")?;
-        let mapped = stmt.query_map([], |row| {
+        let mut stmt = conn.prepare(
+            "SELECT id, machine, cwd, created_at FROM machine_sessions WHERE owner = ?1 ORDER BY created_at DESC",
+        )?;
+        let mapped = stmt.query_map([owner], |row| {
             Ok(MachineSession {
                 id: row.get(0)?,
                 machine: row.get(1)?,
@@ -178,13 +183,66 @@ impl RelayRouter {
         .ok()
     }
 
+    pub fn session_owner(&self, session_id: &str) -> Option<String> {
+        let conn = Connection::open(&self.db_path).ok()?;
+        conn.query_row(
+            "SELECT owner FROM machine_sessions WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+        .filter(|s| !s.is_empty())
+    }
+
+    pub fn owns_machine(&self, machine_id: &str, owner: &str) -> bool {
+        let Ok(conn) = Connection::open(&self.db_path) else {
+            return false;
+        };
+        conn.query_row(
+            "SELECT 1 FROM machines WHERE id = ?1 AND owner = ?2",
+            rusqlite::params![machine_id, owner],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    pub async fn delete_owned_machine(&self, id: &str, owner: &str) -> anyhow::Result<bool> {
+        let db_path = self.db_path.clone();
+        let id_owned = id.to_string();
+        let owner_owned = owner.to_string();
+        let deleted = tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let conn = Connection::open(&db_path)?;
+            let n = conn.execute(
+                "DELETE FROM machines WHERE id = ?1 AND owner = ?2",
+                rusqlite::params![id_owned, owner_owned],
+            )?;
+            if n > 0 {
+                let _ = conn.execute(
+                    "DELETE FROM machine_sessions WHERE machine = ?1",
+                    rusqlite::params![id_owned],
+                );
+            }
+            Ok(n > 0)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!(e))??;
+        if deleted {
+            self.unregister(id).await;
+        }
+        Ok(deleted)
+    }
+
     fn remove_machine_session(&self, session_id: &str) {
         if let Ok(conn) = Connection::open(&self.db_path) {
             let _ = conn.execute("DELETE FROM machine_sessions WHERE id = ?1", [session_id]);
         }
     }
 
-    async fn send_to_machine(&self, machine_id: &str, env: RelayEnvelope) -> Result<(), RelayError> {
+    async fn send_to_machine(
+        &self,
+        machine_id: &str,
+        env: RelayEnvelope,
+    ) -> Result<(), RelayError> {
         let msg = env.text().ok_or_else(|| RelayError {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             message: "envelope serialization failed".into(),
@@ -206,7 +264,11 @@ impl RelayRouter {
         let req = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(req.clone(), tx);
-        let env = RelayEnvelope { session_id: None, req: Some(req.clone()), payload };
+        let env = RelayEnvelope {
+            session_id: None,
+            req: Some(req.clone()),
+            payload,
+        };
         if let Err(e) = self.send_to_machine(machine_id, env).await {
             self.pending.lock().await.remove(&req);
             return Err(e);
@@ -228,6 +290,7 @@ impl RelayRouter {
         machine_id: &str,
         cwd: &str,
         model: Option<String>,
+        owner: &str,
     ) -> Result<String, RelayError> {
         let payload = serde_json::json!({ "kind": "spawn", "cwd": cwd, "model": model });
         let reply = self.request(machine_id, payload).await?;
@@ -244,11 +307,12 @@ impl RelayRouter {
                 };
                 let db_path = self.db_path.clone();
                 let row2 = row.clone();
+                let owner = owner.to_string();
                 let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let conn = Connection::open(&db_path)?;
                     conn.execute(
-                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at) VALUES (?1, ?2, ?3, ?4)",
-                        rusqlite::params![row2.id, row2.machine, row2.cwd, row2.created_at],
+                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at, owner) VALUES (?1, ?2, ?3, ?4, ?5)",
+                        rusqlite::params![row2.id, row2.machine, row2.cwd, row2.created_at, owner],
                     )?;
                     Ok(())
                 })
@@ -270,7 +334,9 @@ impl RelayRouter {
     /// bare SessionEvent JSON — the envelope wrapper is machine-relay routing
     /// only, so unwrap before sending.
     async fn fan_out(&self, session_id: &str, payload: serde_json::Value) {
-        let Some(text) = serde_json::to_string(&payload).ok() else { return };
+        let Some(text) = serde_json::to_string(&payload).ok() else {
+            return;
+        };
         let msg = Message::Text(text.into());
         let mut map = self.attached.lock().await;
         if let Some(subs) = map.get_mut(session_id) {
@@ -285,6 +351,7 @@ impl RelayRouter {
         machine_id: String,
         session_id: String,
         mut socket: WebSocket,
+        read_only: bool,
     ) {
         // Ask the desktop to start streaming this session (idempotent for
         // already-spawned sessions) and to send a snapshot.
@@ -318,6 +385,9 @@ impl RelayRouter {
                 incoming = socket.recv() => {
                     match incoming {
                         Some(Ok(Message::Text(text))) => {
+                            if read_only {
+                                continue;
+                            }
                             // Wrap the client CloudCommand in an envelope.
                             let payload: serde_json::Value = match serde_json::from_str(&text) {
                                 Ok(v) => v,
@@ -405,41 +475,90 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
             name TEXT NOT NULL,
             account TEXT NOT NULL DEFAULT '',
             last_seen TEXT NOT NULL,
-            token TEXT NOT NULL UNIQUE
+            token TEXT NOT NULL UNIQUE,
+            owner TEXT NOT NULL DEFAULT ''
         );
         CREATE TABLE IF NOT EXISTS machine_sessions (
             id TEXT PRIMARY KEY,
             machine TEXT NOT NULL,
             cwd TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            owner TEXT NOT NULL DEFAULT ''
+        );
+        CREATE TABLE IF NOT EXISTS machine_tokens (
+            token TEXT PRIMARY KEY,
+            owner TEXT NOT NULL,
             created_at TEXT NOT NULL
         );",
+    )?;
+    crate::auth::ensure_column(conn, "machines", "owner", "TEXT NOT NULL DEFAULT ''")?;
+    crate::auth::ensure_column(
+        conn,
+        "machine_sessions",
+        "owner",
+        "TEXT NOT NULL DEFAULT ''",
+    )?;
+    Ok(())
+}
+
+pub fn mint_machine_token(db_path: &Path, owner: &str) -> anyhow::Result<String> {
+    let token = Uuid::new_v4().to_string();
+    let conn = Connection::open(db_path)?;
+    conn.execute(
+        "INSERT INTO machine_tokens (token, owner, created_at) VALUES (?1, ?2, ?3)",
+        rusqlite::params![token, owner, Utc::now().to_rfc3339()],
+    )?;
+    Ok(token)
+}
+
+pub fn owner_for_token(db_path: &Path, token: &str) -> Option<String> {
+    let conn = Connection::open(db_path).ok()?;
+    conn.query_row(
+        "SELECT owner FROM machine_tokens WHERE token = ?1",
+        [token],
+        |row| row.get::<_, String>(0),
+    )
+    .ok()
+}
+
+pub fn backfill_machine_tokens(conn: &Connection) -> anyhow::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO machine_tokens (token, owner, created_at)
+         SELECT token, owner, last_seen FROM machines
+         WHERE token != '' AND owner != ''",
+        [],
     )?;
     Ok(())
 }
 
 fn upsert_machine(db_path: &Path, name: &str, token: &str) -> anyhow::Result<String> {
     let conn = Connection::open(db_path)?;
+    let owner: String = conn
+        .query_row(
+            "SELECT owner FROM machine_tokens WHERE token = ?1",
+            [token],
+            |row| row.get(0),
+        )
+        .map_err(|_| anyhow::anyhow!("unknown machine token"))?;
     // Re-register with a known token reuses the machine id.
     let existing: Option<String> = conn
-        .query_row(
-            "SELECT id FROM machines WHERE token = ?1",
-            [token],
-            |row| row.get::<_, String>(0),
-        )
+        .query_row("SELECT id FROM machines WHERE token = ?1", [token], |row| {
+            row.get::<_, String>(0)
+        })
         .ok();
     let id = match existing {
         Some(id) => {
             conn.execute(
-                "UPDATE machines SET name = ?1, last_seen = ?2 WHERE id = ?3",
-                rusqlite::params![name, Utc::now().to_rfc3339(), id],
+                "UPDATE machines SET name = ?1, last_seen = ?2, owner = ?3 WHERE id = ?4",
+                rusqlite::params![name, Utc::now().to_rfc3339(), owner, id],
             )?;
             id
         }
         None => {
             let id = Uuid::new_v4().to_string();
             conn.execute(
-                "INSERT INTO machines (id, name, account, last_seen, token) VALUES (?1, ?2, '', ?3, ?4)",
-                rusqlite::params![id, name, Utc::now().to_rfc3339(), token],
+                "INSERT INTO machines (id, name, account, last_seen, token, owner) VALUES (?1, ?2, '', ?3, ?4, ?5)",
+                rusqlite::params![id, name, Utc::now().to_rfc3339(), token, owner],
             )?;
             id
         }
@@ -456,10 +575,7 @@ fn touch_machine(db_path: &Path, id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-pub async fn relay_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<AppState>,
-) -> impl IntoResponse {
+pub async fn relay_ws(ws: WebSocketUpgrade, State(state): State<AppState>) -> impl IntoResponse {
     ws.on_upgrade(move |socket| handle_relay(socket, state))
 }
 
@@ -487,19 +603,18 @@ async fn handle_relay(socket: WebSocket, state: AppState) {
     let db_path = state.db_path.clone();
     let name = reg.name.clone();
     let token = reg.token.clone();
-    let machine_id = match tokio::task::spawn_blocking(move || upsert_machine(&db_path, &name, &token))
-        .await
-    {
-        Ok(Ok(id)) => id,
-        Ok(Err(e)) => {
-            tracing::error!(%e, "relay: upsert machine");
-            return;
-        }
-        Err(e) => {
-            tracing::error!(%e, "relay: upsert join");
-            return;
-        }
-    };
+    let machine_id =
+        match tokio::task::spawn_blocking(move || upsert_machine(&db_path, &name, &token)).await {
+            Ok(Ok(id)) => id,
+            Ok(Err(e)) => {
+                tracing::error!(%e, "relay: upsert machine");
+                return;
+            }
+            Err(e) => {
+                tracing::error!(%e, "relay: upsert join");
+                return;
+            }
+        };
 
     let ack = serde_json::to_string(&RegisterAck {
         id: machine_id.clone(),

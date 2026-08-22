@@ -31,6 +31,9 @@ pub struct SessionMeta {
     pub view_handle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pid: Option<i64>,
+    /// Owning account uid. Empty on desktop-local rows.
+    #[serde(default)]
+    pub owner: String,
 }
 
 impl SessionRegistry {
@@ -51,9 +54,23 @@ impl SessionRegistry {
                 session_file TEXT,
                 machine TEXT NOT NULL,
                 created_at TEXT NOT NULL,
-                last_active TEXT NOT NULL
+                last_active TEXT NOT NULL,
+                owner TEXT NOT NULL DEFAULT ''
             );",
         )?;
+        {
+            let mut stmt = conn.prepare("PRAGMA table_info(sessions)")?;
+            let cols: Vec<String> = stmt
+                .query_map([], |r| r.get::<_, String>(1))?
+                .collect::<rusqlite::Result<_>>()?;
+            drop(stmt);
+            if !cols.iter().any(|c| c == "owner") {
+                conn.execute(
+                    "ALTER TABLE sessions ADD COLUMN owner TEXT NOT NULL DEFAULT ''",
+                    [],
+                )?;
+            }
+        }
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
         })
@@ -62,8 +79,8 @@ impl SessionRegistry {
     pub fn upsert(&self, meta: &SessionMeta) -> Result<()> {
         let conn = self.conn.lock().expect("registry mutex");
         conn.execute(
-            "INSERT INTO sessions (id, omp_session_id, name, cwd, session_file, machine, created_at, last_active)
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)
+            "INSERT INTO sessions (id, omp_session_id, name, cwd, session_file, machine, created_at, last_active, owner)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
              ON CONFLICT(id) DO UPDATE SET
                 omp_session_id = excluded.omp_session_id,
                 name = excluded.name,
@@ -71,7 +88,8 @@ impl SessionRegistry {
                 session_file = excluded.session_file,
                 machine = excluded.machine,
                 created_at = excluded.created_at,
-                last_active = excluded.last_active",
+                last_active = excluded.last_active,
+                owner = CASE WHEN excluded.owner = '' THEN sessions.owner ELSE excluded.owner END",
             params![
                 meta.id,
                 meta.omp_session_id,
@@ -81,6 +99,7 @@ impl SessionRegistry {
                 meta.machine,
                 meta.created_at.to_rfc3339(),
                 meta.last_active.to_rfc3339(),
+                meta.owner,
             ],
         )?;
         Ok(())
@@ -89,7 +108,7 @@ impl SessionRegistry {
     pub fn list(&self) -> Result<Vec<SessionMeta>> {
         let conn = self.conn.lock().expect("registry mutex");
         let mut stmt = conn.prepare(
-            "SELECT id, omp_session_id, name, cwd, session_file, machine, created_at, last_active
+            "SELECT id, omp_session_id, name, cwd, session_file, machine, created_at, last_active, owner
              FROM sessions ORDER BY last_active DESC",
         )?;
         let rows = stmt.query_map([], row_to_meta)?;
@@ -119,7 +138,7 @@ impl SessionRegistry {
     pub fn get(&self, id: &str) -> Result<Option<SessionMeta>> {
         let conn = self.conn.lock().expect("registry mutex");
         let mut stmt = conn.prepare(
-            "SELECT id, omp_session_id, name, cwd, session_file, machine, created_at, last_active
+            "SELECT id, omp_session_id, name, cwd, session_file, machine, created_at, last_active, owner
              FROM sessions WHERE id = ?1",
         )?;
         Ok(stmt.query_row(params![id], row_to_meta).optional()?)
@@ -140,6 +159,7 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         join_handle: None,
         view_handle: None,
         pid: None,
+        owner: row.get::<_, String>(8).unwrap_or_default(),
     })
 }
 
