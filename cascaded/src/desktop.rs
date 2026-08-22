@@ -52,8 +52,9 @@ enum RelayPayload {
 
 /// Outbound side of the relay connection, shared by every task on this socket.
 type Out = mpsc::UnboundedSender<Message>;
-
 pub async fn run_desktop(cfg: Config, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
+    // The outbound WSS needs a rustls CryptoProvider; install once, idempotently.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let registry = cascade_core::SessionRegistry::open(&cfg.db)?;
     let sessions = SessionManager::new(registry);
 

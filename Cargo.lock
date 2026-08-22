@@ -384,6 +384,7 @@ dependencies = [
  "jsonwebtoken",
  "rand 0.8.7",
  "rusqlite",
+ "rustls",
  "serde",
  "serde_json",
  "tokio",
