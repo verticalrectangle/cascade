@@ -224,4 +224,7 @@ struct JoinedSession: Identifiable, Codable, Equatable {
     var savedAt: Date
     var enhanced: Bool? = nil   // kept for card badges; the daemon directory always sets true
     var tagColor: SessionColor = .default
+    var kind: String? = nil            // "managed" | "terminal"
+    var joinHandle: String? = nil
+    var viewHandle: String? = nil
 }

@@ -44,6 +44,10 @@ struct RemoteSessionMeta: Codable, Equatable {
     let machine: String
     let created_at: Date?
     let last_active: Date?
+    var join_handle: String?
+    var view_handle: String?
+    var pid: Int?
+    var kind: String?
 }
 
 /// cascade-core `UiRequest` (inlined next to `"kind":"ui_request"`).
@@ -143,6 +147,8 @@ final class CascadeClient: ObservableObject {
     private let token: String             // bearer JWT
     private let targetId: String          // cascade session uuid
     private let deviceName: String
+    private var guestSocket: CollabGuestSocket?
+    private var guestMapper = CollabFrameMapper()
     private var socketTask: URLSessionWebSocketTask?
     private var socketSession: URLSession?
     private var receiveLoop = false
@@ -308,7 +314,51 @@ final class CascadeClient: ObservableObject {
         cwd = "…"
     }
 
+    /// Attach to a `kind: terminal` session via an omp collab join/view handle.
+    convenience init?(terminalLink: String, name: String) {
+        guard case .success(let parsed) = CollabLinkParser.parse(terminalLink) else { return nil }
+        self.init(config: Config(base: parsed.wsURL, token: "", sessionId: parsed.roomId, name: name))
+        readOnly = parsed.writeToken == nil
+        joinLink = terminalLink
+        relay = (parsed.wsURL.host ?? "—") + (parsed.wsURL.port.map { ":\($0)" } ?? "")
+        title = parsed.roomId
+        let socket = CollabGuestSocket(link: parsed, name: name)
+        guestSocket = socket
+        socket.onOpen = { [weak self] in
+            Task { @MainActor in
+                guard let self else { return }
+                self.phase = self.welcomed ? "reconnecting" : "waiting"
+                self.rebuild()
+            }
+        }
+        socket.onFrame = { [weak self] frame in
+            Task { @MainActor in self?.applyGuestFrame(frame) }
+        }
+        socket.onControl = { [weak self] ctrl in
+            Task { @MainActor in
+                if ctrl["t"] as? String == "room-closed" { self?.end("room closed") }
+            }
+        }
+        socket.onUnexpectedClose = { [weak self] reason, fatal in
+            Task { @MainActor in
+                guard let self else { return }
+                if fatal {
+                    self.end(reason)
+                } else {
+                    self.phase = "reconnecting"
+                    self.rebuild()
+                }
+            }
+        }
+    }
+
     func connect() {
+        if let guestSocket {
+            guestSocket.connect()
+            phase = welcomed ? "reconnecting" : "waiting"
+            rebuild()
+            return
+        }
         openStream()
     }
 
@@ -316,6 +366,7 @@ final class CascadeClient: ObservableObject {
         terminated = true
         reconnectTask?.cancel()
         receiveLoop = false
+        guestSocket?.close()
         socketTask?.cancel(with: .goingAway, reason: nil)
         socketTask = nil
         socketSession?.invalidateAndCancel()
@@ -328,6 +379,7 @@ final class CascadeClient: ObservableObject {
         reconnectAttempt = 0
         phase = "reconnecting"
         rebuild()
+        if let guestSocket { guestSocket.reconnectNow(); return }
         openStream()
     }
 
@@ -357,7 +409,7 @@ final class CascadeClient: ObservableObject {
     // MARK: WebSocket — /sessions/{id}/stream
 
     private func openStream() {
-        guard !terminated else { return }
+        guard !terminated, guestSocket == nil else { return }
         var comps = URLComponents(url: base.appendingPathComponent("sessions/\(targetId)/stream"), resolvingAgainstBaseURL: false)!
         comps.scheme = comps.scheme == "https" ? "wss" : "ws"
         guard let wsURL = comps.url else {
@@ -413,13 +465,22 @@ final class CascadeClient: ObservableObject {
     func sendPrompt(_ text: String, images: [(mime: String, base64: String)] = []) {
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, images.isEmpty else { return }   // image send not supported by cascade yet
-        send(Wire.prompt(clean))
+        if let guestSocket {
+            guard !readOnly else { return }
+            guestSocket.send(["t": "prompt", "text": clean])
+        } else {
+            send(Wire.prompt(clean))
+        }
         pendingSends.insert(clean)
         rebuild()
     }
 
     func sendAbort() {
-        send(Wire.abort())
+        if let guestSocket {
+            guestSocket.send(["t": "abort"])
+        } else {
+            send(Wire.abort())
+        }
         activity = "ABORTING…"
         rebuild()
     }
@@ -427,14 +488,27 @@ final class CascadeClient: ObservableObject {
     /// Answer a pending ui_request by its cascade request id. `nil` value cancels.
     func answer(reqId: String, value: String?) {
         pendingRequest = nil
-        send(Wire.answer(requestId: reqId, value: value))
+        if let guestSocket {
+            var frame: [String: Any] = ["t": "ui-response"]
+            if let n = Int(reqId) { frame["reqId"] = n } else { frame["reqId"] = reqId }
+            if let value { frame["value"] = value }
+            guestSocket.send(frame)
+        } else {
+            send(Wire.answer(requestId: reqId, value: value))
+        }
         rebuild()
     }
 
     /// Confirm-style asks (method == "confirm"): yes/no without free text.
     func confirm(reqId: String, _ yes: Bool) {
         pendingRequest = nil
-        send(Wire.answer(requestId: reqId, confirmed: yes))
+        if let guestSocket {
+            var frame: [String: Any] = ["t": "ui-response", "value": yes ? "Yes" : "No"]
+            if let n = Int(reqId) { frame["reqId"] = n } else { frame["reqId"] = reqId }
+            guestSocket.send(frame)
+        } else {
+            send(Wire.answer(requestId: reqId, confirmed: yes))
+        }
         rebuild()
     }
 
@@ -452,6 +526,10 @@ final class CascadeClient: ObservableObject {
     /// Menu action: drop the stream and reattach, pulling a fresh snapshot.
     func resync() {
         guard !terminated else { return }
+        if let guestSocket {
+            guestSocket.reconnectNow()
+            return
+        }
         receiveLoop = false
         socketTask?.cancel(with: .goingAway, reason: nil)
         socketTask = nil
@@ -480,6 +558,62 @@ final class CascadeClient: ObservableObject {
         applyFrame(kind, f)
     }
 
+    /// Collab host frame → existing SessionEvent projection.
+    fileprivate func applyGuestFrame(_ frame: [String: Any]) {
+        let t = frame["t"] as? String ?? ""
+        if t == "welcome" {
+            guestMapper.reset()
+            welcomed = true
+            reconnectAttempt = 0
+            endedReason = nil
+            if let header = frame["header"] as? [String: Any] {
+                if let n = header["title"] as? String, !n.isEmpty { title = n }
+                if let id = header["id"] as? String, !id.isEmpty { sessionId = id }
+                if let c = header["cwd"] as? String, !c.isEmpty { cwd = c }
+            }
+            if let st = frame["state"] as? [String: Any] {
+                absorbCollabState(st)
+            }
+            if let ro = frame["readOnly"] as? Bool { readOnly = ro }
+            messages = []
+            streamText = ""; streamThinking = ""; streamDone = false
+            activeTools = []; pendingRequest = nil
+            phase = "live"
+        }
+        if t == "state", let st = frame["state"] as? [String: Any] {
+            absorbCollabState(st)
+        }
+        for ev in guestMapper.mapFrame(frame) {
+            guard let kind = ev["kind"] as? String else { continue }
+            if kind == "snapshot" && t == "welcome" {
+                welcomed = true
+                phase = "live"
+                continue
+            }
+            applyFrame(kind, ev)
+        }
+    }
+
+    private func absorbCollabState(_ st: [String: Any]) {
+        working = st["isStreaming"] as? Bool ?? working
+        if st["isAborting"] as? Bool == true { activity = "ABORTING…" }
+        queued = st["queuedMessageCount"] as? Int ?? queued
+        if let n = st["sessionName"] as? String, !n.isEmpty { title = n }
+        if let c = st["cwd"] as? String, !c.isEmpty { cwd = c }
+        if let level = st["thinkingLevel"] as? String { thinkingLevel = level }
+        if let m = st["model"] as? [String: Any] {
+            if let name = m["name"] as? String, !name.isEmpty { modelName = name }
+            if let provider = m["provider"] as? String, !provider.isEmpty { providerName = provider }
+        }
+        if let list = st["participants"] as? [[String: Any]] {
+            participants = list.map { p in
+                ParticipantInfo(name: p["name"] as? String ?? "peer",
+                                role: p["role"] as? String ?? "guest",
+                                readOnly: p["readOnly"] as? Bool ?? false)
+            }
+        }
+    }
+
     private func applyFrame(_ kind: String, _ f: [String: Any]) {
         switch kind {
         case "snapshot":
@@ -488,7 +622,7 @@ final class CascadeClient: ObservableObject {
             working = f["streaming"] as? Bool ?? false
             welcomed = true
             phase = "live"
-            refreshState()   // pull model/thinking identity right after attach
+            if guestSocket == nil { refreshState() }   // cloud only — guest has no get_state RPC
         case "message_start":
             break   // role-only; content arrives via deltas or MessageEnd
         case "text_delta":
@@ -496,6 +630,11 @@ final class CascadeClient: ObservableObject {
             streamText += f["delta"] as? String ?? ""
             scheduleStreamRebuild()
             return   // delta frames are coalesced; skip the immediate rebuild below
+        case "thinking_delta":
+            streamDone = false
+            streamThinking += f["delta"] as? String ?? ""
+            scheduleStreamRebuild()
+            return
         case "state_changed":
             if let st = f["state"] as? [String: Any] { absorbState(st) }
             if let list = f["models"] as? [[String: Any]] {
@@ -604,6 +743,7 @@ final class CascadeClient: ObservableObject {
         working = false
         currentMode = nil
         receiveLoop = false
+        guestSocket?.close()
         socketTask?.cancel(with: .goingAway, reason: nil)
         rebuild()
     }

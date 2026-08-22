@@ -85,14 +85,18 @@ final class AppModel: ObservableObject {
             let metas = try await CascadeClient.listSessions(account: account)
             var next: [JoinedSession] = metas.map { m in
                 let dirName = (m.cwd as NSString).lastPathComponent
+                let isTerminal = (m.kind ?? "") == "terminal" || m.join_handle != nil || m.view_handle != nil
                 return JoinedSession(
                     id: m.id,
-                    link: m.id,
+                    link: m.join_handle ?? m.view_handle ?? m.id,
                     title: m.name ?? (dirName.isEmpty ? "session" : dirName),
                     relay: m.machine,
-                    readOnly: false,
+                    readOnly: m.join_handle == nil && m.view_handle != nil,
                     savedAt: m.last_active ?? m.created_at ?? .distantPast,
-                    enhanced: true)
+                    enhanced: !isTerminal,
+                    kind: isTerminal ? "terminal" : (m.kind ?? "managed"),
+                    joinHandle: m.join_handle,
+                    viewHandle: m.view_handle)
             }
             // Preserve user color tags across refreshes.
             let oldTags = loadTags()
@@ -109,9 +113,16 @@ final class AppModel: ObservableObject {
     func connect(sessionId: String, paired: Bool = false) -> Bool {
         guard let account else { return false }
         stopWatcher(for: sessionId)
-        let config = CascadeClient.Config(base: account.base, token: account.token,
-                                          sessionId: sessionId, name: UIDevice.current.name)
-        let client = CascadeClient(config: config)
+        let listed = sessions.first(where: { $0.id == sessionId })
+        let terminalLink = listed?.joinHandle ?? listed?.viewHandle
+        let client: CascadeClient
+        if let terminalLink, let guest = CascadeClient(terminalLink: terminalLink, name: UIDevice.current.name) {
+            client = guest
+        } else {
+            let config = CascadeClient.Config(base: account.base, token: account.token,
+                                              sessionId: sessionId, name: UIDevice.current.name)
+            client = CascadeClient(config: config)
+        }
         client.justPaired = paired
         active = client
         client.connect()
@@ -212,9 +223,14 @@ final class AppModel: ObservableObject {
 
     private func startWatcher(for s: JoinedSession) {
         guard clients[s.id] == nil, let account else { return }
-        let config = CascadeClient.Config(base: account.base, token: account.token,
-                                          sessionId: s.id, name: deviceName)
-        let client = CascadeClient(config: config)
+        let client: CascadeClient
+        if let link = s.joinHandle ?? s.viewHandle, let guest = CascadeClient(terminalLink: link, name: deviceName) {
+            client = guest
+        } else {
+            let config = CascadeClient.Config(base: account.base, token: account.token,
+                                              sessionId: s.id, name: deviceName)
+            client = CascadeClient(config: config)
+        }
         clients[s.id] = client
         client.connect()
         watchers[s.id] = client.objectWillChange.receive(on: RunLoop.main).sink { [weak self, weak client] in

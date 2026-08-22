@@ -197,7 +197,10 @@ struct JoinedCard: View {
                     Image(systemName: statusIcon).font(.system(size: 8)).foregroundStyle(statusColor)
                     Text(statusText).font(.term(12)).foregroundStyle(statusColor)
                     Text("·").font(.term(12)).foregroundStyle(t.txtGhost)
-                    if let enh = session.enhanced {
+                    if (session.kind ?? "") == "terminal" {
+                        Text("TERMINAL").font(.term(12)).foregroundStyle(t.txtMuted)
+                        Text("·").font(.term(12)).foregroundStyle(t.txtGhost)
+                    } else if session.enhanced == true {
                         Text("CLOUD").font(.term(12)).foregroundStyle(t.txtMuted)
                         Text("·").font(.term(12)).foregroundStyle(t.txtGhost)
                     }
