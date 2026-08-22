@@ -238,12 +238,12 @@ final class CascadeClient: ObservableObject {
         return try JSONDecoder().decode([MachineInfo].self, from: data)
     }
 
-    static func createSession(account: Account, cwd: String, model: String?) async throws -> String {
+    static func createSession(account: Account, machine: String? = nil, cwd: String, model: String?) async throws -> String {
         var req = URLRequest(url: account.base.appendingPathComponent("sessions"))
         req.httpMethod = "POST"
         req.setValue("Bearer \(account.token)", forHTTPHeaderField: "Authorization")
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        req.httpBody = Wire.createSession(machine: nil, cwd: cwd, model: model).data(using: .utf8)
+        req.httpBody = Wire.createSession(machine: machine, cwd: cwd, model: model).data(using: .utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
         guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],

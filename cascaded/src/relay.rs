@@ -1,25 +1,23 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
-use axum::{
-    extract::{
-        ws::{Message, WebSocket, WebSocketUpgrade},
-        State,
-    },
-    http::StatusCode,
-    response::IntoResponse,
-};
+use axum::extract::ws::{Message, WebSocket};
+use axum::extract::{State, WebSocketUpgrade};
+use axum::http::StatusCode;
+use axum::response::IntoResponse;
 use cascade_core::MachineInfo;
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{mpsc, oneshot, Mutex};
 use uuid::Uuid;
 
 use crate::{json_err, AppState};
 
+/// Machine-relay failure surfaced to HTTP clients.
 #[derive(Debug)]
 pub struct RelayError {
     pub status: StatusCode,
@@ -33,6 +31,24 @@ impl RelayError {
             message: "relay forwarding is not implemented (phase 2)".into(),
         }
     }
+    fn offline(machine: &str) -> Self {
+        Self {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            message: format!("machine {machine} is offline"),
+        }
+    }
+    fn timeout(machine: &str) -> Self {
+        Self {
+            status: StatusCode::GATEWAY_TIMEOUT,
+            message: format!("machine {machine} did not answer in time"),
+        }
+    }
+    fn spawn(message: String) -> Self {
+        Self {
+            status: StatusCode::BAD_GATEWAY,
+            message,
+        }
+    }
 }
 
 impl From<RelayError> for (StatusCode, axum::Json<serde_json::Value>) {
@@ -41,14 +57,38 @@ impl From<RelayError> for (StatusCode, axum::Json<serde_json::Value>) {
     }
 }
 
-/// Routes client traffic to a desktop daemon over its outbound `/relay` socket.
-///
-/// `forward_spawn` / `forward_attach` return 501 until phase 2. The machines
-/// table, WSS endpoint, and `machine_id → ws sender` map are real.
+/// One row of the cloud's cache of desktop-hosted sessions.
+#[derive(Debug, Clone, Serialize)]
+pub struct MachineSession {
+    pub id: String,
+    pub machine: String,
+    pub cwd: String,
+    pub created_at: String,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+struct RelayEnvelope {
+    session_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    req: Option<String>,
+    payload: serde_json::Value,
+}
+
+impl RelayEnvelope {
+    fn text(&self) -> Option<Message> {
+        serde_json::to_string(self).ok().map(|s| Message::Text(s.into()))
+    }
+}
+
+/// Routes client traffic to desktop daemons over their outbound `/relay`
+/// sockets. Spawn uses correlated request/reply (`req`); session events from
+/// a desktop fan out to every attached client stream.
 #[derive(Clone)]
 pub struct RelayRouter {
     db_path: PathBuf,
     connections: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>,
+    pending: Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
+    attached: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -62,6 +102,8 @@ struct RegisterAck {
     id: String,
 }
 
+const REPLY_TIMEOUT: Duration = Duration::from_secs(35);
+
 impl RelayRouter {
     pub fn new(db_path: PathBuf) -> anyhow::Result<Self> {
         let conn = Connection::open(&db_path)?;
@@ -69,6 +111,8 @@ impl RelayRouter {
         Ok(Self {
             db_path,
             connections: Arc::new(Mutex::new(HashMap::new())),
+            pending: Arc::new(Mutex::new(HashMap::new())),
+            attached: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -104,21 +148,243 @@ impl RelayRouter {
             .collect())
     }
 
-    pub async fn forward_spawn(
-        &self,
-        _machine_id: &str,
-        _cwd: &str,
-        _model: Option<String>,
-    ) -> Result<String, RelayError> {
-        Err(RelayError::not_implemented())
+    /// Desktop-hosted sessions known to the cloud (cache of desktop spawns).
+    pub fn list_machine_sessions(&self) -> anyhow::Result<Vec<MachineSession>> {
+        let conn = Connection::open(&self.db_path)?;
+        let mut stmt =
+            conn.prepare("SELECT id, machine, cwd, created_at FROM machine_sessions ORDER BY created_at DESC")?;
+        let mapped = stmt.query_map([], |row| {
+            Ok(MachineSession {
+                id: row.get(0)?,
+                machine: row.get(1)?,
+                cwd: row.get(2)?,
+                created_at: row.get(3)?,
+            })
+        })?;
+        let mut v = Vec::new();
+        for row in mapped {
+            v.push(row?);
+        }
+        Ok(v)
     }
 
-    pub async fn forward_attach(
+    pub fn machine_of(&self, session_id: &str) -> Option<String> {
+        let conn = Connection::open(&self.db_path).ok()?;
+        conn.query_row(
+            "SELECT machine FROM machine_sessions WHERE id = ?1",
+            [session_id],
+            |row| row.get::<_, String>(0),
+        )
+        .ok()
+    }
+
+    fn remove_machine_session(&self, session_id: &str) {
+        if let Ok(conn) = Connection::open(&self.db_path) {
+            let _ = conn.execute("DELETE FROM machine_sessions WHERE id = ?1", [session_id]);
+        }
+    }
+
+    async fn send_to_machine(&self, machine_id: &str, env: RelayEnvelope) -> Result<(), RelayError> {
+        let msg = env.text().ok_or_else(|| RelayError {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            message: "envelope serialization failed".into(),
+        })?;
+        let conns = self.connections.lock().await;
+        let Some(tx) = conns.get(machine_id) else {
+            return Err(RelayError::offline(machine_id));
+        };
+        tx.send(msg).map_err(|_| RelayError::offline(machine_id))
+    }
+
+    /// Request/reply over the relay socket: register a oneshot under `req`,
+    /// ship the envelope, await the desktop's reply.
+    async fn request(
         &self,
-        _machine_id: &str,
-        _session_id: &str,
-    ) -> Result<(), RelayError> {
-        Err(RelayError::not_implemented())
+        machine_id: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value, RelayError> {
+        let req = Uuid::new_v4().to_string();
+        let (tx, rx) = oneshot::channel();
+        self.pending.lock().await.insert(req.clone(), tx);
+        let env = RelayEnvelope { session_id: None, req: Some(req.clone()), payload };
+        if let Err(e) = self.send_to_machine(machine_id, env).await {
+            self.pending.lock().await.remove(&req);
+            return Err(e);
+        }
+        match tokio::time::timeout(REPLY_TIMEOUT, rx).await {
+            Ok(Ok(reply)) => Ok(reply),
+            Ok(Err(_)) => Err(RelayError::offline(machine_id)),
+            Err(_) => {
+                self.pending.lock().await.remove(&req);
+                Err(RelayError::timeout(machine_id))
+            }
+        }
+    }
+
+    /// Forward a spawn to a desktop daemon. On success the desktop's session
+    /// id becomes the cloud-visible id and is cached for listing.
+    pub async fn forward_spawn(
+        &self,
+        machine_id: &str,
+        cwd: &str,
+        model: Option<String>,
+    ) -> Result<String, RelayError> {
+        let payload = serde_json::json!({ "kind": "spawn", "cwd": cwd, "model": model });
+        let reply = self.request(machine_id, payload).await?;
+        match reply.get("kind").and_then(|k| k.as_str()) {
+            Some("spawn_ok") => {
+                let Some(id) = reply.get("id").and_then(|i| i.as_str()) else {
+                    return Err(RelayError::spawn("machine reply missing session id".into()));
+                };
+                let row = MachineSession {
+                    id: id.to_string(),
+                    machine: machine_id.to_string(),
+                    cwd: cwd.to_string(),
+                    created_at: Utc::now().to_rfc3339(),
+                };
+                let db_path = self.db_path.clone();
+                let row2 = row.clone();
+                let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let conn = Connection::open(&db_path)?;
+                    conn.execute(
+                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at) VALUES (?1, ?2, ?3, ?4)",
+                        rusqlite::params![row2.id, row2.machine, row2.cwd, row2.created_at],
+                    )?;
+                    Ok(())
+                })
+                .await;
+                Ok(id.to_string())
+            }
+            Some("spawn_err") => Err(RelayError::spawn(
+                reply
+                    .get("message")
+                    .and_then(|m| m.as_str())
+                    .unwrap_or("machine spawn failed")
+                    .to_string(),
+            )),
+            _ => Err(RelayError::spawn("unexpected machine reply".into())),
+        }
+    }
+
+    /// Fan a desktop event envelope out to every attached client stream.
+    async fn fan_out(&self, session_id: &str, payload: serde_json::Value) {
+        let env = RelayEnvelope { session_id: Some(session_id.to_string()), req: None, payload };
+        let Some(msg) = env.text() else { return };
+        let mut map = self.attached.lock().await;
+        if let Some(subs) = map.get_mut(session_id) {
+            subs.retain(|tx| tx.send(msg.clone()).is_ok());
+        }
+    }
+
+    /// Wire a client stream socket into a desktop-hosted session: request the
+    /// snapshot, then proxy commands out and events in until either side ends.
+    pub async fn proxy_stream(
+        self,
+        machine_id: String,
+        session_id: String,
+        mut socket: WebSocket,
+    ) {
+        // Ask the desktop to start streaming this session (idempotent for
+        // already-spawned sessions) and to send a snapshot.
+        let env = RelayEnvelope {
+            session_id: Some(session_id.clone()),
+            req: None,
+            payload: serde_json::json!({ "kind": "get_snapshot" }),
+        };
+        let _ = self.send_to_machine(&machine_id, env).await;
+
+        let (tx, mut rx) = mpsc::unbounded_channel::<Message>();
+        self.attached
+            .lock()
+            .await
+            .entry(session_id.clone())
+            .or_default()
+            .push(tx);
+
+        loop {
+            tokio::select! {
+                out = rx.recv() => {
+                    match out {
+                        Some(msg) => {
+                            if socket.send(msg).await.is_err() {
+                                break;
+                            }
+                        }
+                        None => break,
+                    }
+                }
+                incoming = socket.recv() => {
+                    match incoming {
+                        Some(Ok(Message::Text(text))) => {
+                            // Wrap the client CloudCommand in an envelope.
+                            let payload: serde_json::Value = match serde_json::from_str(&text) {
+                                Ok(v) => v,
+                                Err(_) => continue,
+                            };
+                            let env = RelayEnvelope {
+                                session_id: Some(session_id.clone()),
+                                req: None,
+                                payload,
+                            };
+                            if self.send_to_machine(&machine_id, env).await.is_err() {
+                                break;
+                            }
+                        }
+                        Some(Ok(_)) => {}
+                        Some(Err(_)) | None => break,
+                    }
+                }
+            }
+        }
+
+        // Detach this client.
+        let mut map = self.attached.lock().await;
+        if let Some(subs) = map.get_mut(&session_id) {
+            subs.retain(|tx| !tx.is_closed());
+            if subs.is_empty() {
+                map.remove(&session_id);
+            }
+        }
+    }
+
+    /// Forward a session shutdown to the owning machine and drop the cached row.
+    pub async fn forward_shutdown(&self, session_id: &str) -> Result<(), RelayError> {
+        let Some(machine_id) = self.machine_of(session_id) else {
+            return Ok(()); // not a machine session; caller handles locally
+        };
+        let env = RelayEnvelope {
+            session_id: Some(session_id.to_string()),
+            req: None,
+            payload: serde_json::json!({ "kind": "shutdown" }),
+        };
+        let result = self.send_to_machine(&machine_id, env).await;
+        self.remove_machine_session(session_id);
+        // Events stream ends with ProcessExited; clients see the session die.
+        result.map(|_| ())
+    }
+
+    /// Route one desktop→cloud frame: replies resolve pending requests;
+    /// session-scoped payloads fan out to attached clients.
+    async fn route_from_machine(&self, text: &str) {
+        let Ok(env) = serde_json::from_str::<RelayEnvelope>(text) else {
+            tracing::warn!(payload = text, "relay: bad envelope from machine");
+            return;
+        };
+        if let Some(req) = env.req.clone() {
+            let mut pending = self.pending.lock().await;
+            if let Some(tx) = pending.remove(&req) {
+                let _ = tx.send(env.payload);
+            }
+            return;
+        }
+        if let Some(sid) = env.session_id.clone() {
+            self.fan_out(&sid, env.payload).await;
+        }
+    }
+
+    /// Whether a machine currently holds an outbound relay connection.
+    pub async fn machine_online(&self, machine_id: &str) -> bool {
+        self.connections.lock().await.contains_key(machine_id)
     }
 
     async fn register_connection(&self, machine_id: String, tx: mpsc::UnboundedSender<Message>) {
@@ -138,6 +404,12 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
             account TEXT NOT NULL DEFAULT '',
             last_seen TEXT NOT NULL,
             token TEXT NOT NULL UNIQUE
+        );
+        CREATE TABLE IF NOT EXISTS machine_sessions (
+            id TEXT PRIMARY KEY,
+            machine TEXT NOT NULL,
+            cwd TEXT NOT NULL,
+            created_at TEXT NOT NULL
         );",
     )?;
     Ok(())
@@ -145,27 +417,31 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
 
 fn upsert_machine(db_path: &Path, name: &str, token: &str) -> anyhow::Result<String> {
     let conn = Connection::open(db_path)?;
-    let existing: Option<String> = {
-        let mut stmt = conn.prepare("SELECT id FROM machines WHERE token = ?1")?;
-        let mut rows = stmt.query(rusqlite::params![token])?;
-        match rows.next()? {
-            Some(row) => Some(row.get(0)?),
-            None => None,
+    // Re-register with a known token reuses the machine id.
+    let existing: Option<String> = conn
+        .query_row(
+            "SELECT id FROM machines WHERE token = ?1",
+            [token],
+            |row| row.get::<_, String>(0),
+        )
+        .ok();
+    let id = match existing {
+        Some(id) => {
+            conn.execute(
+                "UPDATE machines SET name = ?1, last_seen = ?2 WHERE id = ?3",
+                rusqlite::params![name, Utc::now().to_rfc3339(), id],
+            )?;
+            id
+        }
+        None => {
+            let id = Uuid::new_v4().to_string();
+            conn.execute(
+                "INSERT INTO machines (id, name, account, last_seen, token) VALUES (?1, ?2, '', ?3, ?4)",
+                rusqlite::params![id, name, Utc::now().to_rfc3339(), token],
+            )?;
+            id
         }
     };
-    let now = Utc::now().to_rfc3339();
-    if let Some(id) = existing {
-        conn.execute(
-            "UPDATE machines SET name = ?1, last_seen = ?2 WHERE id = ?3",
-            rusqlite::params![name, now, id],
-        )?;
-        return Ok(id);
-    }
-    let id = Uuid::new_v4().to_string();
-    conn.execute(
-        "INSERT INTO machines (id, name, account, last_seen, token) VALUES (?1, ?2, ?3, ?4, ?5)",
-        rusqlite::params![id, name, "", now, token],
-    )?;
     Ok(id)
 }
 
@@ -245,6 +521,7 @@ async fn handle_relay(socket: WebSocket, state: AppState) {
             }
         }
     };
+    let router = state.relay.clone();
     let db_path = state.db_path.clone();
     let id_for_read = machine_id.clone();
     let read = async {
@@ -252,10 +529,16 @@ async fn handle_relay(socket: WebSocket, state: AppState) {
             match frame {
                 Ok(Message::Close(_)) => break,
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
-                Ok(Message::Text(_)) | Ok(Message::Binary(_)) => {
+                Ok(Message::Text(t)) => {
+                    router.route_from_machine(&t).await;
                     let path = db_path.clone();
                     let id = id_for_read.clone();
                     let _ = tokio::task::spawn_blocking(move || touch_machine(&path, &id)).await;
+                }
+                Ok(Message::Binary(b)) => {
+                    if let Ok(text) = String::from_utf8(b.to_vec()) {
+                        router.route_from_machine(&text).await;
+                    }
                 }
                 Err(_) => break,
             }

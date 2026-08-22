@@ -96,6 +96,26 @@ pub async fn list_sessions(
         .await
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    // Desktop-hosted sessions (spawned via the machine relay).
+    for m in state.relay.list_machine_sessions().unwrap_or_default() {
+        let created = chrono::DateTime::parse_from_rfc3339(&m.created_at)
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or_else(|_| chrono::Utc::now());
+        out.push(ListedSession {
+            id: m.id,
+            omp_session_id: None,
+            name: None,
+            cwd: m.cwd,
+            session_file: None,
+            machine: m.machine,
+            created_at: created,
+            last_active: created,
+            kind: "managed".into(),
+            join_handle: None,
+            view_handle: None,
+            pid: None,
+        });
+    }
     for t in terminals {
         let created = chrono::DateTime::parse_from_rfc3339(&t.created_at)
             .map(|d| d.with_timezone(&chrono::Utc))
@@ -170,11 +190,14 @@ pub async fn delete_session(
     _user: AuthUser,
     Path(id): Path<String>,
 ) -> Result<StatusCode, (StatusCode, Json<serde_json::Value>)> {
-    if state.sessions.get(&id).await.is_none() {
-        let listed = state.sessions.list().await;
-        if listed.iter().any(|m| m.id == id && m.machine != "cloud") {
-            return Err(crate::relay::RelayError::not_implemented().into());
-        }
+    // Desktop-hosted session: forward the shutdown and drop the cached row.
+    if state.sessions.get(&id).await.is_none() && state.relay.machine_of(&id).is_some() {
+        state
+            .relay
+            .forward_shutdown(&id)
+            .await
+            .map_err(|e| (e.status, Json(serde_json::json!({ "error": e.message }))))?;
+        return Ok(StatusCode::NO_CONTENT);
     }
     state
         .sessions
@@ -196,14 +219,20 @@ pub async fn session_stream(
     Path(id): Path<String>,
     _user: AuthUser,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let Some(session) = state.sessions.get(&id).await else {
-        let listed = state.sessions.list().await;
-        if listed.iter().any(|m| m.id == id && m.machine != "cloud") {
-            return Err(crate::relay::RelayError::not_implemented().into());
+    if let Some(session) = state.sessions.get(&id).await {
+        return Ok(ws.on_upgrade(move |socket| handle_stream(socket, session, state.sessions.clone())));
+    }
+    // Not cloud-local: a desktop-hosted session behind the machine relay.
+    if let Some(machine) = state.relay.machine_of(&id) {
+        if !state.relay.machine_online(&machine).await {
+            return Err(json_err(StatusCode::SERVICE_UNAVAILABLE, &format!("machine {machine} is offline")));
         }
-        return Err(json_err(StatusCode::NOT_FOUND, "session not found"));
-    };
-    Ok(ws.on_upgrade(move |socket| handle_stream(socket, session, state.sessions.clone())))
+        let router = state.relay.clone();
+        return Ok(ws.on_upgrade(move |socket| async move {
+            router.proxy_stream(machine, id, socket).await;
+        }));
+    }
+    Err(json_err(StatusCode::NOT_FOUND, "session not found"))
 }
 
 async fn handle_stream(

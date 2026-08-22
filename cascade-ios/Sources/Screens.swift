@@ -225,7 +225,8 @@ struct SpawnView: View {
     @State private var model = ""
     @State private var busy = false
     @State private var error: String?
-
+    @State private var machines: [MachineInfo] = []
+    @State private var machine: String? = nil   // nil = cloud host itself
     var body: some View {
         ZStack {
             t.bg.ignoresSafeArea()
@@ -253,13 +254,27 @@ struct SpawnView: View {
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 8)
 
+                    if machines.contains(where: { !$0.isCloud }) {
+                        Text("MACHINE").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
+                        Picker("", selection: Binding(
+                            get: { machine ?? "cloud" },
+                            set: { machine = $0 == "cloud" ? nil : $0 })) {
+                            ForEach(machines) { m in
+                                Text("\(m.name)\(m.online ? "" : " · offline")").tag(m.id)
+                            }
+                        }
+                        .pickerStyle(.segmented)
+                        .padding(.bottom, 14)
+                    }
+
                     if let err = error { Text(err).font(.term(12)).foregroundStyle(t.cAdvisor).padding(.bottom, 16) }
 
                     Button {
                         guard !busy, !cwd.trimmingCharacters(in: .whitespaces).isEmpty else { return }
                         busy = true; error = nil
                         Task {
-                            error = await app.spawn(cwd: cwd.trimmingCharacters(in: .whitespaces),
+                            error = await app.spawn(machine: machine,
+                                                    cwd: cwd.trimmingCharacters(in: .whitespaces),
                                                     model: model.trimmingCharacters(in: .whitespaces).isEmpty ? nil : model)
                             busy = false
                             if error == nil { onClose() }
@@ -281,5 +296,10 @@ struct SpawnView: View {
             }
         }
         .preferredColorScheme(theme.preferredScheme)
+        .task {
+            if let account = app.account {
+                machines = (try? await CascadeClient.listMachines(account: account)) ?? []
+            }
+        }
     }
 }

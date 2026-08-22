@@ -137,10 +137,10 @@ final class AppModel: ObservableObject {
     }
 
     /// Spawn a new cloud session in `cwd`, then attach to it.
-    func spawn(cwd: String, model: String?) async -> String? {
+    func spawn(machine: String? = nil, cwd: String, model: String?) async -> String? {
         guard let account else { return "not signed in" }
         do {
-            let id = try await CascadeClient.createSession(account: account, cwd: cwd, model: model)
+            let id = try await CascadeClient.createSession(account: account, machine: machine, cwd: cwd, model: model)
             connect(sessionId: id, paired: true)
             await refreshSessions()
             return nil
