@@ -14,7 +14,7 @@ struct TrustView: View {
     var body: some View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
-                    Text("TRUST · DAEMON MIRROR").font(.labl(9)).tracking(1.6).foregroundStyle(t.txtLabel)
+                    Text("SESSION DETAILS").font(.labl(9)).tracking(1.6).foregroundStyle(t.txtLabel)
                         .padding(.horizontal, 16).padding(.top, 6).padding(.bottom, 2)
                     Text("Trust").font(.disp(40)).foregroundStyle(t.txt).textCase(.uppercase)
                         .padding(.horizontal, 16).padding(.bottom, 14)

@@ -143,21 +143,24 @@ pub async fn create_session(
     _user: AuthUser,
     Json(body): Json<CreateSessionRequest>,
 ) -> Result<Json<CreateSessionResponse>, (StatusCode, Json<serde_json::Value>)> {
-    if body.cwd.trim().is_empty() {
-        return Err(json_err(StatusCode::BAD_REQUEST, "cwd is required"));
-    }
+    let cwd = if body.cwd.trim().is_empty() {
+        std::env::var("HOME").unwrap_or_else(|_| "/".into())
+    } else {
+        body.cwd.clone()
+    };
+    let cwd = cwd.as_str();
     let machine = body.machine.as_deref().unwrap_or("cloud");
     if machine != "cloud" {
         return state
             .relay
-            .forward_spawn(machine, &body.cwd, body.model)
+            .forward_spawn(machine, cwd, body.model)
             .await
             .map(|id| Json(CreateSessionResponse { id }))
             .map_err(Into::into);
     }
 
     let opts = SpawnOptions {
-        cwd: PathBuf::from(&body.cwd),
+        cwd: PathBuf::from(cwd),
         model: body.model,
         ..SpawnOptions::default()
     };

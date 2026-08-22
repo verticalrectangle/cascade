@@ -138,6 +138,7 @@ struct LoginGate: View {
     @EnvironmentObject var theme: ThemeStore
     private var t: Theme { theme.t }
     @State private var host = ""
+    @State private var customServer = false
     @State private var email = ""
     @State private var password = ""
     @State private var busy = false
@@ -149,13 +150,15 @@ struct LoginGate: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("CASCADE").font(.labl(10)).tracking(2).foregroundStyle(t.txtLabel).padding(.bottom, 18)
-                    Text("Sign in to\nyour daemon.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
-                    Text("Point the app at a cascaded cloud host. Your JWT stays on-device; sessions stream from the daemon over WSS.")
+                    Text("Sign in.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
+                    Text("Your coding sessions from every computer, in one place.")
                         .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 22)
 
-                    field(icon: "server.rack", placeholder: "host — e.g. wickrunner.com or 192.168.1.10:7700",
-                          text: $host, error: error != nil && email.isEmpty)
-                        .padding(.bottom, 10)
+                    if customServer {
+                        field(icon: "server.rack", placeholder: "your server address",
+                              text: $host, error: error != nil && email.isEmpty)
+                            .padding(.bottom, 10)
+                    }
                     field(icon: "envelope", placeholder: "email", text: $email, keyboard: .emailAddress)
                         .padding(.bottom, 10)
                     SecureField("", text: $password, prompt: Text("password").foregroundStyle(t.txtMuted))
@@ -184,8 +187,12 @@ struct LoginGate: View {
                     .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
                     .padding(.top, 8)
 
-                    Text("Run cascaded with CASCADE_ALLOW_PASSWORDS=email:password to seed an account.")
-                        .font(.bodyF(12)).foregroundStyle(t.txtGhost).padding(.top, 20)
+                    Button {
+                        customServer.toggle()
+                    } label: {
+                        Text(customServer ? "use the Cascade server instead" : "run your own server?")
+                            .font(.bodyF(12)).foregroundStyle(t.txtMuted)
+                    }.padding(.top, 20)
                 }.padding(22)
             }
         }
@@ -221,12 +228,19 @@ struct SpawnView: View {
     @EnvironmentObject var theme: ThemeStore
     let onClose: () -> Void
     private var t: Theme { theme.t }
-    @State private var cwd = ""
+    @State private var cwd = UserDefaults.standard.string(forKey: "cascade.lastCwd") ?? ""
     @State private var model = ""
     @State private var busy = false
     @State private var error: String?
     @State private var machines: [MachineInfo] = []
     @State private var machine: String? = nil   // nil = cloud host itself
+    @State private var showOptions = false
+
+    private var machineName: String {
+        if let machine, let m = machines.first(where: { $0.id == machine }) { return m.name }
+        return "cloud"
+    }
+
     var body: some View {
         ZStack {
             t.bg.ignoresSafeArea()
@@ -238,60 +252,73 @@ struct SpawnView: View {
                         Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 20)).foregroundStyle(t.txt) }
                     }.padding(.bottom, 18)
 
-                    Text("Spawn a\nsession.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
-                    Text("The daemon spawns omp in the working directory you name, then you attach to its live transcript.")
+                    Text("Start a\nsession.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
+                    Text("A fresh coding agent on \(machineName == "cloud" ? "the server" : machineName), ready for anything you throw at it.")
                         .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 22)
-
-                    Text("WORKING DIRECTORY").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
-                    TextField("", text: $cwd, prompt: Text("path on the daemon machine").foregroundStyle(t.txtMuted))
-                        .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 14)
-
-                    Text("MODEL — OPTIONAL").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
-                    TextField("", text: $model, prompt: Text("provider/model id").foregroundStyle(t.txtMuted))
-                        .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
-                        .textInputAutocapitalization(.never).autocorrectionDisabled()
-                        .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 8)
-
-                    if machines.contains(where: { !$0.isCloud }) {
-                        Text("MACHINE").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
-                        Picker("", selection: Binding(
-                            get: { machine ?? "cloud" },
-                            set: { machine = $0 == "cloud" ? nil : $0 })) {
-                            ForEach(machines) { m in
-                                Text("\(m.name)\(m.online ? "" : " · offline")").tag(m.id)
-                            }
-                        }
-                        .pickerStyle(.segmented)
-                        .padding(.bottom, 14)
-                    }
 
                     if let err = error { Text(err).font(.term(12)).foregroundStyle(t.cAdvisor).padding(.bottom, 16) }
 
                     Button {
-                        guard !busy, !cwd.trimmingCharacters(in: .whitespaces).isEmpty else { return }
+                        guard !busy else { return }
                         busy = true; error = nil
                         Task {
                             error = await app.spawn(machine: machine,
                                                     cwd: cwd.trimmingCharacters(in: .whitespaces),
                                                     model: model.trimmingCharacters(in: .whitespaces).isEmpty ? nil : model)
                             busy = false
-                            if error == nil { onClose() }
+                            if error == nil {
+                                if !cwd.trimmingCharacters(in: .whitespaces).isEmpty {
+                                    UserDefaults.standard.set(cwd, forKey: "cascade.lastCwd")
+                                }
+                                onClose()
+                            }
                         }
                     } label: {
                         HStack(spacing: 8) {
                             if busy { ProgressView().tint(t.accent) } else { Image(systemName: "bolt.fill") }
-                            Text("SPAWN & ATTACH").font(.labl(11))
+                            Text("START").font(.labl(11))
                         }
                         .foregroundStyle(t.accent).frame(maxWidth: .infinity).padding(.vertical, 14)
                         .glass(t, 16, active: true, border: false, interactive: false)
                     }.press()
-                    .disabled(cwd.trimmingCharacters(in: .whitespaces).isEmpty)
-                    .padding(.bottom, 20)
+                    .padding(.bottom, 14)
 
-                    Text("cwd must exist on the daemon host. Sessions run as real omp processes there.")
-                        .font(.bodyF(12.5)).foregroundStyle(t.txtMuted)
+                    DisclosureGroup(
+                        isExpanded: $showOptions,
+                        content: {
+                            VStack(alignment: .leading, spacing: 0) {
+                                Text("FOLDER").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8).padding(.top, 4)
+                                TextField("", text: $cwd, prompt: Text("leave empty for the server's home").foregroundStyle(t.txtMuted))
+                                    .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 14)
+
+                                Text("MODEL").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
+                                TextField("", text: $model, prompt: Text("leave empty for the default").foregroundStyle(t.txtMuted))
+                                    .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
+                                    .textInputAutocapitalization(.never).autocorrectionDisabled()
+                                    .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true).padding(.bottom, 8)
+
+                                if machines.contains(where: { !$0.isCloud }) {
+                                    Text("RUN IT ON").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.bottom, 8)
+                                    Picker("", selection: Binding(
+                                        get: { machine ?? "cloud" },
+                                        set: { machine = $0 == "cloud" ? nil : $0 })) {
+                                        ForEach(machines) { m in
+                                            Text("\(m.name)\(m.online ? "" : " · offline")").tag(m.id)
+                                        }
+                                    }
+                                    .pickerStyle(.segmented)
+                                    .padding(.bottom, 10)
+                                }
+                            }
+                        },
+                        label: {
+                            Text("Options").font(.bodyF(13)).foregroundStyle(t.txtMuted)
+                        }
+                    )
+                    .tint(t.txtMuted)
+                    .padding(.bottom, 20)
                 }.padding(22)
             }
         }

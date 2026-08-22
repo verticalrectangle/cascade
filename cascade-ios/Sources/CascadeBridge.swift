@@ -295,10 +295,13 @@ final class CascadeClient: ObservableObject {
         return f.date(from: s)
     }
 
-    /// Parse a user-typed host field into a base URL ("wickrunner.com" or full https URL).
+    /// The default Cascade cloud — what everyone sees unless they self-host.
+    static let defaultBase = URL(string: "https://wickrunner.com:7701")!
+
+    /// Parse a user-typed host field into a base URL; empty → the default cloud.
     static func normalizeBase(_ raw: String) -> URL? {
         var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !s.isEmpty else { return nil }
+        if s.isEmpty { return defaultBase }
         if !s.contains("://") { s = "https://" + s }
         guard let u = URL(string: s), let host = u.host, !host.isEmpty else { return nil }
         var comps = URLComponents(url: u, resolvingAgainstBaseURL: false)!
@@ -928,7 +931,7 @@ final class CascadeClient: ObservableObject {
         var t = UITurn(id: "ui-\(req.id)", type: .ask)
         t.reqKey = req.id
         t.askKind = askKind(for: req.method)
-        t.question = req.title ?? req.message ?? "The daemon needs input."
+        t.question = req.title ?? req.message ?? "The agent is asking…"
         t.helpText = req.message ?? ""
         t.prefill = req.prefill ?? req.placeholder ?? ""
         if t.askKind == "confirm" {

@@ -83,6 +83,8 @@ final class AppModel: ObservableObject {
         guard let account else { return }
         do {
             let metas = try await CascadeClient.listSessions(account: account)
+            let machineNames: [String: String] = Dictionary(
+                uniqueKeysWithValues: ((try? await CascadeClient.listMachines(account: account)) ?? []).map { ($0.id, $0.name) })
             var next: [JoinedSession] = metas.map { m in
                 let dirName = (m.cwd as NSString).lastPathComponent
                 let isTerminal = (m.kind ?? "") == "terminal" || m.join_handle != nil || m.view_handle != nil
@@ -90,7 +92,7 @@ final class AppModel: ObservableObject {
                     id: m.id,
                     link: m.join_handle ?? m.view_handle ?? m.id,
                     title: m.name ?? (dirName.isEmpty ? "session" : dirName),
-                    relay: m.machine,
+                    relay: machineNames[m.machine] ?? m.machine,
                     readOnly: m.join_handle == nil && m.view_handle != nil,
                     savedAt: m.last_active ?? m.created_at ?? .distantPast,
                     enhanced: !isTerminal,

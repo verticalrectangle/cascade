@@ -51,7 +51,7 @@ final class NotificationPolicy {
                 notifiedAsks.insert(key)
                 if away {
                     Notifier.post(title: c.title.isEmpty ? "session" : c.title,
-                                  body: ask.question.isEmpty ? "The daemon is asking for your input." : ask.question,
+                                  body: ask.question.isEmpty ? "The agent is asking for your input." : ask.question,
                                   id: "ask-\(ask.reqKey)")
                 }
             }

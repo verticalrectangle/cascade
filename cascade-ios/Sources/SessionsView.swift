@@ -68,7 +68,7 @@ struct SessionsView: View {
             .onTapGesture { app.connect(sessionId: s.id) }
             .contextMenu {
                 ColorMenu(session: s, t: t)
-                Button(role: .destructive) { Task { await app.deleteSession(s) } } label: { Label("Delete on daemon", systemImage: "trash") }
+                Button(role: .destructive) { Task { await app.deleteSession(s) } } label: { Label("Delete", systemImage: "trash") }
             } preview: {
                 JoinedCard(session: s, t: t, state: app.state[s.id] ?? SessionState())
                     .frame(maxWidth: sessionCardMaxWidth)
@@ -84,7 +84,7 @@ struct SessionsView: View {
         VStack(spacing: 12) {
             LogoMark(t: t, size: 44, color: t.txtGhost)
             Text("NO SESSIONS YET").font(.labl(10)).tracking(2).foregroundStyle(t.txtMuted)
-            (Text("Spawn a session from your cascade daemon — tap ").foregroundStyle(t.txtMuted) + Text("+").font(.term(15)).foregroundStyle(t.accent) + Text(" below. The daemon runs omp; this app is its live window.").foregroundStyle(t.txtMuted))
+            (Text("No sessions yet — tap ").foregroundStyle(t.txtMuted) + Text("+").font(.term(15)).foregroundStyle(t.accent) + Text(" to start one. Everything you run on your computers shows up here.").foregroundStyle(t.txtMuted))
                 .font(.bodyF(13.5)).multilineTextAlignment(.center)
             Spacer().frame(height: 16)
         }
