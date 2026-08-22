@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Cascade
+Comment=Coding agents from all your computers, in one window
+Exec=cascade-gtk
+Icon=cascade
+Type=Application
+Categories=Development;
+Terminal=false
+StartupNotify=true

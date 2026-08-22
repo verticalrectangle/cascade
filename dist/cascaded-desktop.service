@@ -1,0 +1,13 @@
+[Unit]
+Description=Cascade desktop role (makes this machine spawnable from any client)
+After=network-online.target
+
+[Service]
+Environment=CASCADE_ROLE=desktop
+Environment=CASCADE_DB=%h/.local/share/cascade/desktop.db
+ExecStart=%h/.local/bin/cascaded
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

@@ -1,0 +1,32 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: GTK build deps
+        run: sudo apt-get update && sudo apt-get install -y libgtk-4-dev libadwaita-1-dev libwebkitgtk-6.0-dev pkg-config
+      - name: Build
+        run: cargo build --release -p cascade-gtk -p cascaded
+      - name: Package
+        run: |
+          mkdir -p out/cascade
+          cp target/release/cascade-gtk target/release/cascaded out/cascade/
+          cp dist/install.sh out/cascade/
+          cp dist/cascade.desktop dist/cascade.png dist/cascaded-desktop.service out/cascade/
+          tar -czf cascade-linux-x86_64.tar.gz -C out cascade
+      - name: Upload release assets
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            cascade-linux-x86_64.tar.gz
+            dist/install.sh
