@@ -323,7 +323,7 @@ final class CascadeClient: ObservableObject {
         relay = base.host ?? "—"
         if let port = base.port { relay += ":\(port)" }
         sessionId = targetId
-        title = "session \(targetId.prefix(8))"
+        title = "new session"
         cwd = "…"
     }
 
@@ -819,7 +819,7 @@ final class CascadeClient: ObservableObject {
         var out: [UITurn] = []
         var toolIndex: [String: Int] = [:]
 
-        if welcomed && justPaired { out.append(UITurn.sys("paired", "CONNECTED TO CASCADE DAEMON")) }
+        if welcomed && justPaired { out.append(UITurn.sys("paired", "SESSION STARTED")) }
 
         for entry in messages {
             let eid = messageId(entry)
