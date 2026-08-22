@@ -23,7 +23,7 @@ import Foundation
 
 // MARK: - Wire types (cascade-core serde shapes)
 
-struct MachineInfo: Codable, Equatable {
+struct MachineInfo: Codable, Equatable, Identifiable {
     let id: String
     let name: String
     let online: Bool
