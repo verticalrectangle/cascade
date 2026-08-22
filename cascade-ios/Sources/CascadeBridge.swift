@@ -68,6 +68,7 @@ enum Wire {
     static func prompt(_ text: String) -> String {
         body(["kind": "prompt", "message": text])
     }
+    static func abort() -> String { body(["kind": "abort"]) }
     static func setModel(provider: String, modelId: String) -> String {
         body(["kind": "set_model", "provider": provider, "model_id": modelId])
     }
@@ -147,6 +148,7 @@ final class CascadeClient: ObservableObject {
     private var receiveLoop = false
     private var terminated = false        // deliberate end (leave/bye/process exit) — never reconnect
     private var reconnectAttempt = 0
+    private var reconnectTask: Task<Void, Never>?
     @Published private(set) var plan: [PlanPhase] = []
     private var messages: [[String: Any]] = []   // finalized AgentMessages (omp shape, verbatim)
     private var streamText = ""
