@@ -266,10 +266,12 @@ impl RelayRouter {
         }
     }
 
-    /// Fan a desktop event envelope out to every attached client stream.
+    /// Fan a desktop event out to every attached client stream. Clients speak
+    /// bare SessionEvent JSON — the envelope wrapper is machine-relay routing
+    /// only, so unwrap before sending.
     async fn fan_out(&self, session_id: &str, payload: serde_json::Value) {
-        let env = RelayEnvelope { session_id: Some(session_id.to_string()), req: None, payload };
-        let Some(msg) = env.text() else { return };
+        let Some(text) = serde_json::to_string(&payload).ok() else { return };
+        let msg = Message::Text(text.into());
         let mut map = self.attached.lock().await;
         if let Some(subs) = map.get_mut(session_id) {
             subs.retain(|tx| tx.send(msg.clone()).is_ok());
