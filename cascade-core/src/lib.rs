@@ -9,6 +9,6 @@ pub mod state {
 pub use registry::{SessionMeta, SessionRegistry};
 pub use remote::{CloudClient, CloudCommand, MachineInfo};
 pub use session::{
-    OmpSession, RpcSessionState, SessionEvent, SessionManager, SessionSnapshot, SpawnOptions,
-    TodoItem, TodoPhase, TodoStatus, UiAnswer, UiMethod, UiRequest,
+    ModelInfo, OmpSession, RpcSessionState, SessionEvent, SessionManager, SessionSnapshot,
+    SpawnOptions, TodoItem, TodoPhase, TodoStatus, UiAnswer, UiMethod, UiRequest,
 };

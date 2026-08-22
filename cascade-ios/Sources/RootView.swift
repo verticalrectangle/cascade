@@ -20,6 +20,9 @@ final class AppModel: ObservableObject {
 
     private let key = "cascade.account"
     private let tagKey = "cascade.tags"
+    @Published var mutedSessions: Set<String> = []
+
+    private let muteKey = "cascade.muted"
     private let liveActivity = LiveActivityController()
     private let notify = NotificationPolicy()
     private var cancellable: AnyCancellable?
@@ -35,7 +38,21 @@ final class AppModel: ObservableObject {
             account = acct
         }
         tab = Int(ProcessInfo.processInfo.environment["CASCADE_TAB"] ?? "") ?? 0
+        if let data = UserDefaults.standard.data(forKey: muteKey),
+           let muted = try? JSONDecoder().decode(Set<String>.self, from: data) {
+            mutedSessions = muted
+        }
         if account != nil { Task { await refreshSessions() } }
+    }
+
+    func muteSession(_ id: String) {
+        mutedSessions.insert(id)
+        if let data = try? JSONEncoder().encode(mutedSessions) { UserDefaults.standard.set(data, forKey: muteKey) }
+    }
+
+    func unmuteSession(_ id: String) {
+        mutedSessions.remove(id)
+        if let data = try? JSONEncoder().encode(mutedSessions) { UserDefaults.standard.set(data, forKey: muteKey) }
     }
 
     func signOut() {
@@ -141,7 +158,7 @@ final class AppModel: ObservableObject {
         }
         // Only notify while you're AWAY (locked / another app).
         let away = UIApplication.shared.applicationState != .active
-        notify.update(c, away: away)
+        notify.update(c, away: away, muted: mutedSessions.contains(id))
     }
 
     func leave() {

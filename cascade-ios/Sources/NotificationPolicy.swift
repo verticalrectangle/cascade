@@ -23,7 +23,8 @@ final class NotificationPolicy {
         notifiedEnded = false
     }
 
-    func update(_ c: CascadeClient, away: Bool) {
+    func update(_ c: CascadeClient, away: Bool, muted: Bool = false) {
+        guard !muted else { return }   // per-session mute: no ask/done banners at all
         // ENDED — flush any coalesced done as the Ended summary, once.
         if c.phase == "ended" {
             if !notifiedEnded {

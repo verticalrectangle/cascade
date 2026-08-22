@@ -27,13 +27,12 @@ final class SessionVM: ObservableObject {
     var currentMode: String? { live.currentMode }
     var goal: GoalInfo? { live.goal }
     var models: [ModelOption] { live.models }
-    var thinkingLevels: [String] { live.thinkingLevels }
-    var thinkingLevel: String { live.thinkingLevel }
+    var providerName: String { live.providerName }
     var modelName: String { live.modelName }
+    var thinkingLevel: String { live.thinkingLevel }
+    var availableModels: [ModelOption] { live.availableModels }
+    var thinkingLevels: [String] { live.thinkingLevels }
     var joinLink: String { "" }   // no invite links over the cloud transport
-
-    @Published var awaitingVision = false
-    private var sawWorking = false
 
     init(live client: CascadeClient, seed s: Session) {
         session = s

@@ -28,10 +28,13 @@ struct EditorView: View {
     @State private var draft = ""
     @State private var viewer: String? = nil
     @State private var planExpanded = false
+    @State private var showShare = false
+    @State private var exportText = ""
     @FocusState private var composerFocused: Bool
     @State private var stickToBottom = true
     @State private var didInitialScroll = false
     @State private var scrollVisibleHeight: CGFloat = 0
+    @EnvironmentObject var app: AppModel
 
     init(client: CascadeClient) {
         let seed = Session(id: "live", repo: client.title, branch: client.readOnly ? "watch" : "control",
@@ -61,6 +64,9 @@ struct EditorView: View {
         .fullScreenCover(item: Binding(get: { viewer.map { IdStr($0) } }, set: { viewer = $0?.v })) { img in
             ImageViewer(src: img.v, label: "focused image") { viewer = nil }.environmentObject(theme)
         }
+        .sheet(isPresented: $showShare) {
+            ShareSheet(items: [exportText])
+        }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { vm.live.reconnectIfNeeded() }
         }
@@ -70,11 +76,79 @@ struct EditorView: View {
 
     @ViewBuilder private var sessionMenu: some View {
         Menu {
+            Button { vm.live.resync() } label: {
+                Label("Resync", systemImage: "arrow.triangle.2.circlepath")
+            }
+            Menu {
+                ForEach(vm.availableModels) { m in
+                    Button {
+                        vm.live.setModel(provider: m.provider, modelId: m.modelId)
+                    } label: {
+                        if m.provider == vm.providerName && m.name == vm.modelName {
+                            Label(m.name, systemImage: "checkmark")
+                        } else {
+                            Text(m.name)
+                        }
+                    }
+                }
+                if vm.availableModels.isEmpty {
+                    Text("No models reported yet")
+                }
+            } label: {
+                if vm.providerName.isEmpty {
+                    Label("Model · \(vm.modelName)", systemImage: "cpu")
+                } else {
+                    Label("Model · \(vm.providerName) / \(vm.modelName)", systemImage: "cpu")
+                }
+            }
+            Menu {
+                ForEach(vm.thinkingLevels, id: \.self) { lvl in
+                    Button { vm.live.setThinking(lvl) } label: {
+                        if lvl == vm.thinkingLevel { Label(lvl, systemImage: "checkmark") } else { Text(lvl) }
+                    }
+                }
+            } label: {
+                Label("Thinking · \(vm.thinkingLevel.isEmpty ? "—" : vm.thinkingLevel)", systemImage: "brain")
+            }
+            Divider()
+            Button {
+                exportText = EditorView.markdownExport(turns: vm.turns)
+                showShare = true
+            } label: {
+                Label("Export transcript…", systemImage: "square.and.arrow.up")
+            }
+            Toggle(isOn: Binding(
+                get: { app.mutedSessions.contains(vm.live.sessionId) },
+                set: { muted in
+                    if muted { app.muteSession(vm.live.sessionId) } else { app.unmuteSession(vm.live.sessionId) }
+                })) {
+                Label("Mute notifications", systemImage: "bell.slash")
+            }
+            Divider()
             Button { UIPasteboard.general.string = vm.session.dir } label: { Label("Copy cwd", systemImage: "doc.on.doc") }
-            Button(role: .destructive) { vm.stop() } label: { Label("Abort current turn", systemImage: "stop.fill") }
+            Button { UIPasteboard.general.string = vm.live.sessionId } label: { Label("Copy session id", systemImage: "doc.on.doc") }
         } label: {
             Image(systemName: "ellipsis").font(.system(size: 16, weight: .semibold)).foregroundStyle(t.accent)
         }
+    }
+
+    static func markdownExport(turns: [UITurn]) -> String {
+        var out = "# Cascade transcript\n\n"
+        for t in turns {
+            switch t.type {
+            case .user: out += "**You:**\n\n\(t.text)\n\n"
+            case .agent: out += "**Agent:**\n\n\(t.text)\n\n"
+            case .thinking:
+                out += "<details><summary>thinking</summary>\n\n\(t.text)\n\n</details>\n\n"
+            case .tool:
+                out += "**Tool · \(t.head)**\n\n```\n\(t.lines.joined(separator: "\n"))\n```\n\n"
+            case .ask:
+                out += "**Ask:** \(t.question)\n\n" + t.options.map { "- \($0)" }.joined(separator: "\n") + "\n\n"
+            case .sys: out += "> \(t.text)\n\n"
+            case .advisor: out += "**Advisor:**\n\n\(t.text)\n\n"
+            }
+        }
+        return out
     }
 
     // MARK: transcript
@@ -348,4 +422,15 @@ struct PlanStrip: View {
         default: t.txtMuted
         }
     }
+}
+
+/// UIActivityViewController bridge for the transcript export share sheet.
+struct ShareSheet: UIViewControllerRepresentable {
+    let items: [Any]
+
+    func makeUIViewController(context: Context) -> UIActivityViewController {
+        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    }
+
+    func updateUIViewController(_ uiViewController: UIActivityViewController, context: Context) {}
 }

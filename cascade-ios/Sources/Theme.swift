@@ -1,7 +1,7 @@
 //  Theme.swift
 //  Cascade design tokens — Vertical Rectangle brutalist-glass. Dark = VR mono +
 //  amber. Light = Rosé Pine Dawn (gold accent). Sharp-ish corners, hairline depth,
-//  restrained frost. Terminal voice = VT323 in the accent. Everything keys off Theme.
+//  restrained frost. Terminal voice = SF Mono (system monospaced). Everything keys off Theme.
 
 import SwiftUI
 
@@ -100,12 +100,12 @@ extension Color {
     }
 }
 
-// MARK: - Type ramp (Inter stand-in via system; VT323 for terminal voice)
+// MARK: - Type ramp (Inter stand-in via system; SF Mono for terminal voice)
 
 extension Font {
     static func disp(_ s: CGFloat) -> Font { .system(size: s, weight: .black) }      // 900 uppercase display
     static func labl(_ s: CGFloat) -> Font { .system(size: s, weight: .bold) }        // wide-tracked labels
-    static func term(_ s: CGFloat) -> Font { .custom("VT323-Regular", size: s) }      // amber terminal voice
+    static func term(_ s: CGFloat) -> Font { .system(size: s, design: .monospaced) }  // SF Mono terminal voice
     static func bodyF(_ s: CGFloat) -> Font { .system(size: s, weight: .regular) }
     static func serif(_ s: CGFloat) -> Font { .system(size: s, design: .serif) }      // New York — agent prose
     static func num(_ s: CGFloat) -> Font { .system(size: s, weight: .semibold).monospacedDigit() }

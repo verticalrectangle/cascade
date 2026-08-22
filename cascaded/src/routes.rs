@@ -255,14 +255,20 @@ async fn handle_stream(
                             Ok(CloudCommand::GetState) => match session.get_state().await {
                                 Ok(state) => {
                                     let frame = cascade_core::SessionEvent::StateChanged;
-                                    // Re-emit the full state payload alongside the event so
-                                    // thin clients don't need a separate REST round-trip.
+                                    // Re-emit the full state payload alongside the event
+                                    // (plus the model catalog) so thin clients don't need a
+                                    // separate REST round-trip.
+                                    let models = session.available_models().await.unwrap_or_default();
                                     let mut ev = serde_json::to_value(&frame)
                                         .unwrap_or(serde_json::Value::Null);
                                     if let Some(map) = ev.as_object_mut() {
                                         map.insert(
                                             "state".into(),
                                             serde_json::to_value(&state).unwrap_or(serde_json::Value::Null),
+                                        );
+                                        map.insert(
+                                            "models".into(),
+                                            serde_json::to_value(&models).unwrap_or(serde_json::Value::Null),
                                         );
                                     }
                                     if let Ok(text) = serde_json::to_string(&ev) {

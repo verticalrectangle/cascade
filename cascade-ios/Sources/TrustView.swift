@@ -63,7 +63,9 @@ struct TrustLive: View {
             Text("MODEL").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted).padding(.horizontal, 20).padding(.bottom, 10)
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 10) {
-                    Text(client.modelName).font(.term(15)).foregroundStyle(t.txt).lineLimit(1)
+                    (Text(client.providerName.isEmpty ? "—" : client.providerName).font(.term(15)).foregroundStyle(t.txtMuted)
+                        + Text(" / ").font(.term(15)).foregroundStyle(t.txtGhost)
+                        + Text(client.modelName).font(.term(15)).foregroundStyle(t.txt)).lineLimit(1)
                     Spacer()
                     Chip(t: t, text: client.thinkingLevel, on: true)
                 }

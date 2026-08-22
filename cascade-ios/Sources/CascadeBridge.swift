@@ -68,7 +68,13 @@ enum Wire {
     static func prompt(_ text: String) -> String {
         body(["kind": "prompt", "message": text])
     }
-    static func abort() -> String { body(["kind": "abort"]) }
+    static func setModel(provider: String, modelId: String) -> String {
+        body(["kind": "set_model", "provider": provider, "model_id": modelId])
+    }
+    static func setThinking(_ level: String) -> String {
+        body(["kind": "set_thinking", "level": level])
+    }
+    static func getState() -> String { body(["kind": "get_state"]) }
     static func answer(requestId: String, value: String? = nil, confirmed: Bool? = nil) -> String {
         var response: [String: Any] = [:]
         if let value { response["value"] = value }
@@ -100,7 +106,7 @@ final class CascadeClient: ObservableObject {
     @Published private(set) var working = false
     @Published private(set) var title = "session"
     @Published private(set) var cwd = "~"
-    @Published private(set) var modelName = "—"
+    @Published private(set) var modelName = "—"               // display name only; provider split below
     @Published private(set) var tokensLabel = "—"
     @Published private(set) var costLabel = "—"
     @Published private(set) var endedReason: String?
@@ -109,7 +115,6 @@ final class CascadeClient: ObservableObject {
     // Trust / Activity surfaces.
     @Published private(set) var sessionId = ""
     @Published private(set) var relay = "—"                    // reused: shows host + session id
-    @Published private(set) var thinkingLevel = "—"
     @Published private(set) var contextPercent: Double?
     @Published private(set) var queued = 0
     @Published private(set) var participants: [ParticipantInfo] = []
@@ -117,15 +122,15 @@ final class CascadeClient: ObservableObject {
     @Published private(set) var progress: [SubagentProgress] = []
 
     // Kept for view compatibility; permanently off over the cloud transport.
-    // (No collab plugin exists here: no slash palette, no model routing editor,
-    // no image send, no rewind.)
     @Published private(set) var enhanced = false
     @Published private(set) var canSendImages = false
-    @Published private(set) var nativeVision = false
-    @Published private(set) var visionModelAvailable = false
-    @Published private(set) var commands: [CascadeCommand] = []
-    @Published private(set) var models: [ModelOption] = []
-    @Published private(set) var thinkingLevels: [String] = []
+    // Model identity, split for clean display: "provider / model".
+    @Published private(set) var providerName = ""
+    @Published private(set) var modelName = ""
+    @Published private(set) var thinkingLevel = ""
+    @Published private(set) var availableModels: [ModelOption] = []
+    @Published private(set) var thinkingLevels: [String] = ["off", "minimal", "low", "medium", "high"]
+    @Published private(set) var models: [ModelOption] = []   // legacy alias surface; kept empty
     private(set) var joinLink = ""
 
     /// Fired after every applied frame (SessionVM bridges this to its own publish).
@@ -140,7 +145,7 @@ final class CascadeClient: ObservableObject {
     private var receiveLoop = false
     private var terminated = false        // deliberate end (leave/bye/process exit) — never reconnect
     private var reconnectAttempt = 0
-    private var reconnectTask: Task<Void, Never>?
+    @Published private(set) var plan: [PlanPhase] = []
     private var messages: [[String: Any]] = []   // finalized AgentMessages (omp shape, verbatim)
     private var streamText = ""
     private var streamThinking = ""
@@ -148,7 +153,6 @@ final class CascadeClient: ObservableObject {
     private var activeTools: [(id: String, tool: [String: Any])] = []
     private var pendingRequest: CascadeUiRequest?
     private var pendingSends: Set<String> = []   // optimistic prompts awaiting echo
-    @Published private(set) var plan: [PlanPhase] = []
     @Published private(set) var welcomed = false
     @Published private(set) var goal: GoalInfo?
     @Published private(set) var activity: String?
@@ -430,7 +434,42 @@ final class CascadeClient: ObservableObject {
         rebuild()
     }
 
-    // MARK: frame application
+    // MARK: model / thinking control
+
+    /// Switch model. `provider` + `modelId` map 1:1 to omp's set_model RPC.
+    func setModel(provider: String, modelId: String) {
+        send(Wire.setModel(provider: provider, modelId: modelId))
+    }
+
+    func setThinking(_ level: String) {
+        send(Wire.setThinking(level))
+    }
+
+    /// Menu action: drop the stream and reattach, pulling a fresh snapshot.
+    func resync() {
+        guard !terminated else { return }
+        receiveLoop = false
+        socketTask?.cancel(with: .goingAway, reason: nil)
+        socketTask = nil
+        openStream()
+    }
+
+    /// Ask the daemon to re-emit state (model/thinking) on this stream.
+    func refreshState() {
+        send(Wire.getState())
+    }
+
+    /// Adopt RpcSessionState JSON: model {provider,id,name…}, thinkingLevel.
+    private func absorbState(_ st: [String: Any]?) {
+        guard let st else { return }
+        if let m = st["model"] as? [String: Any] {
+            let provider = m["provider"] as? String ?? ""
+            let name = m["name"] as? String ?? m["id"] as? String ?? ""
+            if !provider.isEmpty { providerName = provider }
+            if !name.isEmpty { modelName = name }
+        }
+        if let lvl = st["thinking_level"] as? String { thinkingLevel = lvl }
+    }
 
     private func applyFrameJSON(_ s: String) {
         guard let d = s.data(using: .utf8), let f = Wire.event(from: d), let kind = f["kind"] as? String else { return }
@@ -445,6 +484,7 @@ final class CascadeClient: ObservableObject {
             working = f["streaming"] as? Bool ?? false
             welcomed = true
             phase = "live"
+            refreshState()   // pull model/thinking identity right after attach
         case "message_start":
             break   // role-only; content arrives via deltas or MessageEnd
         case "text_delta":
@@ -452,10 +492,17 @@ final class CascadeClient: ObservableObject {
             streamText += f["delta"] as? String ?? ""
             scheduleStreamRebuild()
             return   // delta frames are coalesced; skip the immediate rebuild below
-        case "thinking_delta":
-            streamDone = false
-            streamThinking += f["delta"] as? String ?? ""
-            scheduleStreamRebuild()
+        case "state_changed":
+            if let st = f["state"] as? [String: Any] { absorbState(st) }
+            if let list = f["models"] as? [[String: Any]] {
+                availableModels = list.compactMap { m in
+                    guard let provider = m["provider"] as? String,
+                          let id = m["id"] as? String else { return nil }
+                    let name = m["name"] as? String ?? id
+                    return ModelOption(modelId: id, name: name, provider: provider)
+                }
+            }
+            rebuild()
             return
         case "message_end":
             if let m = f["message"] as? [String: Any] { messages.append(m); absorbMessage(m) }
@@ -520,9 +567,6 @@ final class CascadeClient: ObservableObject {
             }
         case "session_info":
             if let n = f["title"] as? String, !n.isEmpty { title = n }
-        case "state_changed":
-            // Model/thinking/etc changed server-side; nothing to pull (no get_state REST route yet).
-            break
         case "turn_started":
             working = true
         case "process_exited":

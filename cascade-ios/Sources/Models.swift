@@ -195,7 +195,7 @@ struct GoalInfo: Equatable {
 // MARK: - capabilities surfaced by the daemon (slash palette etc. — none over cascade cloud yet)
 
 struct CascadeCommand: Identifiable { var id: String { name }; let name: String; let summary: String }
-struct ModelOption: Identifiable { var id: String { modelId }; let modelId: String; let name: String; var vision = false }
+struct ModelOption: Identifiable { var id: String { provider + "/" + modelId }; let modelId: String; let name: String; var provider: String = ""; var vision = false }
 
 // MARK: - Joined sessions (persisted locally — the guest's own room list)
 

@@ -179,6 +179,14 @@ pub struct OmpSession {
     inner: Arc<SessionInner>,
 }
 
+
+/// A model in the catalog, provider split for display ("provider / model").
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ModelInfo {
+    pub provider: String,
+    pub id: String,
+    pub name: String,
+}
 impl OmpSession {
     pub async fn spawn(opts: SpawnOptions) -> Result<OmpSession> {
         let mut cmd = Command::new(&opts.omp_bin);
@@ -193,9 +201,11 @@ impl OmpSession {
         if let Some(model) = &opts.model {
             cmd.arg("--model").arg(model);
         }
+
         if let Some(resume) = &opts.resume {
             cmd.arg("--resume").arg(resume);
         }
+
         if let Some(dir) = &opts.session_dir {
             cmd.arg("--session-dir").arg(dir);
         }
@@ -395,6 +405,34 @@ impl OmpSession {
             }))
             .await?;
         Ok(())
+    }
+
+    /// Model catalog for the model-switch menu (omp `get_available_models`).
+    pub async fn available_models(&self) -> Result<Vec<ModelInfo>> {
+        let resp = self
+            .inner
+            .rpc
+            .command(json!({ "type": "get_available_models" }))
+            .await?;
+        let data = resp.data.unwrap_or(Value::Null);
+        let models = data
+            .get("models")
+            .and_then(|m| m.as_array())
+            .cloned()
+            .unwrap_or_default();
+        Ok(models
+            .iter()
+            .filter_map(|m| {
+                let provider = m.get("provider")?.as_str()?.to_string();
+                let id = m.get("id")?.as_str()?.to_string();
+                let name = m
+                    .get("name")
+                    .and_then(|n| n.as_str())
+                    .unwrap_or(&id)
+                    .to_string();
+                Some(ModelInfo { provider, id, name })
+            })
+            .collect())
     }
 
     pub async fn get_state(&self) -> Result<RpcSessionState> {
