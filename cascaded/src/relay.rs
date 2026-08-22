@@ -91,6 +91,7 @@ pub struct RelayRouter {
     connections: Arc<Mutex<HashMap<String, mpsc::UnboundedSender<Message>>>>,
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
     attached: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>>,
+    bandwidth: Arc<Mutex<crate::bandwidth::BandwidthLedger>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,6 +116,7 @@ impl RelayRouter {
             connections: Arc::new(Mutex::new(HashMap::new())),
             pending: Arc::new(Mutex::new(HashMap::new())),
             attached: Arc::new(Mutex::new(HashMap::new())),
+            bandwidth: Arc::new(Mutex::new(crate::bandwidth::BandwidthLedger::from_env())),
         })
     }
 
@@ -337,6 +339,28 @@ impl RelayRouter {
         let Some(text) = serde_json::to_string(&payload).ok() else {
             return;
         };
+        // Per-owner daily bandwidth budget for relayed traffic.
+        if let Some(owner) = self.session_owner(session_id) {
+            match self.bandwidth.lock().await.allow(&owner, text.len()) {
+                crate::bandwidth::BandwidthDecision::Allow => {}
+                crate::bandwidth::BandwidthDecision::Warn => {
+                    // One notice per owner per UTC day instead of the dropped event.
+                    let notice = serde_json::json!({
+                        "kind": "notice",
+                        "level": "warning",
+                        "message": "relay bandwidth cap reached",
+                    });
+                    let Some(ntext) = serde_json::to_string(&notice).ok() else { return };
+                    let nmsg = Message::Text(ntext.into());
+                    let mut map = self.attached.lock().await;
+                    if let Some(subs) = map.get_mut(session_id) {
+                        subs.retain(|tx| tx.send(nmsg.clone()).is_ok());
+                    }
+                    return;
+                }
+                crate::bandwidth::BandwidthDecision::Drop => return,
+            }
+        }
         let msg = Message::Text(text.into());
         let mut map = self.attached.lock().await;
         if let Some(subs) = map.get_mut(session_id) {
