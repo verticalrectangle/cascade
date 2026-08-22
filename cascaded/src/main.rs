@@ -42,6 +42,7 @@
 //! `SessionManager::shutdown_all`.
 
 mod auth;
+mod bandwidth;
 mod desktop;
 mod relay;
 mod routes;
