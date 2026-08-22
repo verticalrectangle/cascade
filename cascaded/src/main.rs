@@ -309,8 +309,11 @@ async fn run_cloud(
         .route("/sessions/{id}/stream", get(routes::session_stream))
         .route(
             "/sessions/{id}/share",
-            post(routes::create_share).delete(routes::delete_share),
+            get(routes::get_share)
+                .post(routes::create_share)
+                .delete(routes::delete_share),
         )
+        .route("/s/{token}", get(routes::resolve_share))
         .route("/relay", get(relay::relay_ws))
         .route(
             "/register-terminal",

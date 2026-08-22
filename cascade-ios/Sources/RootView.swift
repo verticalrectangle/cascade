@@ -55,12 +55,22 @@ final class AppModel: ObservableObject {
         if let data = try? JSONEncoder().encode(mutedSessions) { UserDefaults.standard.set(data, forKey: muteKey) }
     }
 
+    /// session id → live view-share (in-memory; refreshed on connect via GET /sessions/{id}/share).
+    @Published var sessionShares: [String: CascadeClient.ShareInfo] = [:]
+
     func signOut() {
         UserDefaults.standard.removeObject(forKey: key)
         leave()
         for s in sessions { stopWatcher(for: s.id) }
         sessions = []
+        sessionShares = [:]
         account = nil
+    }
+
+    private func adopt(_ acct: CascadeClient.Account) async {
+        account = acct
+        if let data = try? JSONEncoder().encode(acct) { UserDefaults.standard.set(data, forKey: key) }
+        await refreshSessions()
     }
 
     /// Login against the daemon and remember it.
@@ -68,9 +78,19 @@ final class AppModel: ObservableObject {
         guard let base = CascadeClient.normalizeBase(rawBase) else { return "that doesn't look like a host url" }
         do {
             let acct = try await CascadeClient.login(base: base, email: email, password: password)
-            account = acct
-            if let data = try? JSONEncoder().encode(acct) { UserDefaults.standard.set(data, forKey: key) }
-            await refreshSessions()
+            await adopt(acct)
+            return nil
+        } catch {
+            return (error as? CascadeClient.BridgeError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Create an account (invite + password) and remember it, same as sign-in.
+    func register(base rawBase: String, email: String, password: String, invite: String) async -> String? {
+        guard let base = CascadeClient.normalizeBase(rawBase) else { return "that doesn't look like a host url" }
+        do {
+            let acct = try await CascadeClient.register(base: base, email: email, password: password, invite: invite)
+            await adopt(acct)
             return nil
         } catch {
             return (error as? CascadeClient.BridgeError)?.errorDescription ?? error.localizedDescription
@@ -134,8 +154,73 @@ final class AppModel: ObservableObject {
         notify.reset()
         cancellable = client.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in self?.onClientChanged() }
         scheduleActiveWelcomeTimeout(client)
-        Task { await refreshSessions() }
+        Task {
+            await refreshSessions()
+            await refreshShare(for: sessionId)
+        }
         return true
+    }
+
+    /// Read-only attach using a view-share token as the stream Bearer.
+    func attachShared(base: URL, token: String, sessionId: String) {
+        if active != nil { leave() }
+        stopWatcher(for: sessionId)
+        let config = CascadeClient.Config(base: base, token: token,
+                                          sessionId: sessionId, name: UIDevice.current.name,
+                                          readOnly: true)
+        let client = CascadeClient(config: config)
+        active = client
+        client.connect()
+        showEditor = ProcessInfo.processInfo.environment["CASCADE_SHOWCASE"] != "1"
+        connectedId = sessionId
+        if ProcessInfo.processInfo.environment["CASCADE_SCREENSHOT"] != "1" { Notifier.requestAuth() }
+        notify.reset()
+        cancellable = client.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in self?.onClientChanged() }
+        scheduleActiveWelcomeTimeout(client)
+    }
+
+    func openSharedLink(_ raw: String) async -> String? {
+        guard let parsed = CascadeClient.parseShareLink(raw) else {
+            return "that doesn't look like a view link"
+        }
+        do {
+            let sessionId = try await CascadeClient.resolveShare(base: parsed.base, token: parsed.token)
+            attachShared(base: parsed.base, token: parsed.token, sessionId: sessionId)
+            return nil
+        } catch {
+            return (error as? CascadeClient.BridgeError)?.errorDescription ?? error.localizedDescription
+        }
+    }
+
+    /// Mint a view link for the connected session. Returns the share URL, or nil on failure.
+    func shareSession() async -> String? {
+        guard let account, let id = connectedId, !id.isEmpty else { return nil }
+        do {
+            let info = try await CascadeClient.createShare(account: account, sessionId: id)
+            sessionShares[id] = info
+            return info.url
+        } catch {
+            return nil
+        }
+    }
+
+    func stopSharing() async {
+        guard let account, let id = connectedId else { return }
+        try? await CascadeClient.deleteShare(account: account, sessionId: id)
+        sessionShares.removeValue(forKey: id)
+    }
+
+    func refreshShare(for id: String) async {
+        guard let account else { return }
+        do {
+            if let info = try await CascadeClient.getShare(account: account, sessionId: id) {
+                sessionShares[id] = info
+            } else {
+                sessionShares.removeValue(forKey: id)
+            }
+        } catch {
+            // Older daemons have no GET /sessions/{id}/share — keep local-only state.
+        }
     }
 
     /// Spawn a new cloud session in `cwd`, then attach to it.
@@ -191,6 +276,7 @@ final class AppModel: ObservableObject {
         sessions.removeAll { $0.id == s.id }
         live[s.id] = nil
         state[s.id] = nil
+        sessionShares.removeValue(forKey: s.id)
         stopWatcher(for: s.id)
     }
 
@@ -337,6 +423,7 @@ struct RootView: View {
     @EnvironmentObject var app: AppModel
     @Environment(\.colorScheme) private var colorScheme
     @State private var showPair = ProcessInfo.processInfo.environment["CASCADE_SHOW_PAIR"] == "1"
+    @State private var showOpenLink = false
     @State private var searchText = ""
     private var t: Theme { theme.t }
 
@@ -363,6 +450,13 @@ struct RootView: View {
                         }
                         DefaultToolbarItem(kind: .search, placement: .bottomBar)
                         ToolbarSpacer(.flexible, placement: .bottomBar)
+                        ToolbarItem(placement: .bottomBar) {
+                            Button { showOpenLink = true } label: {
+                                Image(systemName: "link")
+                                    .font(.system(size: 17, weight: .semibold))
+                            }
+                            .accessibilityLabel("Open a view link")
+                        }
                         ToolbarItem(placement: .bottomBar) {
                             Button { showPair = true } label: {
                                 Image(systemName: "plus")
@@ -395,6 +489,11 @@ struct RootView: View {
                             .environmentObject(app)
                             .environmentObject(theme)
                             .toolbar(.hidden, for: .navigationBar)
+                    }
+                    .sheet(isPresented: $showOpenLink) {
+                        OpenShareView(onClose: { showOpenLink = false })
+                            .environmentObject(app)
+                            .environmentObject(theme)
                     }
             }
         }

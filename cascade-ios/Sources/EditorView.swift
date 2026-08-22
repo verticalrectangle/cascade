@@ -30,6 +30,7 @@ struct EditorView: View {
     @State private var planExpanded = false
     @State private var showShare = false
     @State private var exportText = ""
+    @State private var toast: String?
     @FocusState private var composerFocused: Bool
     @State private var stickToBottom = true
     @State private var didInitialScroll = false
@@ -69,6 +70,26 @@ struct EditorView: View {
         }
         .onChange(of: scenePhase) { _, phase in
             if phase == .active { vm.live.reconnectIfNeeded() }
+        }
+        .overlay(alignment: .top) {
+            if let toast {
+                Text(toast)
+                    .font(.term(12))
+                    .foregroundStyle(t.txt)
+                    .padding(.horizontal, 14).padding(.vertical, 8)
+                    .glass(t, 16, flat: true)
+                    .padding(.top, 8)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeInOut(duration: 0.2), value: toast)
+    }
+
+    private func showToast(_ message: String) {
+        toast = message
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000)
+            if toast == message { toast = nil }
         }
     }
 
@@ -116,6 +137,30 @@ struct EditorView: View {
                 showShare = true
             } label: {
                 Label("Export transcript…", systemImage: "square.and.arrow.up")
+            }
+            if !vm.readOnly && vm.live.joinLink.isEmpty {
+                Button {
+                    Task {
+                        if let url = await app.shareSession() {
+                            UIPasteboard.general.string = url
+                            showToast("Link copied")
+                        } else {
+                            showToast("Couldn't create a view link")
+                        }
+                    }
+                } label: {
+                    Label("Share view link…", systemImage: "link")
+                }
+                if app.sessionShares[vm.live.sessionId] != nil {
+                    Button {
+                        Task {
+                            await app.stopSharing()
+                            showToast("Sharing stopped")
+                        }
+                    } label: {
+                        Label("Stop sharing", systemImage: "link.badge.minus")
+                    }
+                }
             }
             Toggle(isOn: Binding(
                 get: { app.mutedSessions.contains(vm.live.sessionId) },

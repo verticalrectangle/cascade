@@ -12,7 +12,7 @@ use axum::{
 use cascade_core::{CloudCommand, SessionManager, SpawnOptions};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -40,6 +40,12 @@ pub struct TokenResponse {
 pub struct ShareResponse {
     pub token: String,
     pub url: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct ShareLookup {
+    pub session_id: String,
+    pub read_only: bool,
 }
 
 enum StreamAccess {
@@ -289,6 +295,7 @@ pub async fn create_share(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
+    headers: HeaderMap,
 ) -> Result<Json<ShareResponse>, (StatusCode, Json<serde_json::Value>)> {
     if !owns_session(&state, &user.uid, &id).await {
         return Err(json_err(StatusCode::NOT_FOUND, "session not found"));
@@ -300,8 +307,52 @@ pub async fn create_share(
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(ShareResponse {
+        url: share_url(&headers, &token),
         token,
-        url: format!("/sessions/{id}/stream"),
+    }))
+}
+
+pub async fn get_share(
+    State(state): State<AppState>,
+    user: AuthUser,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Result<Json<ShareResponse>, (StatusCode, Json<serde_json::Value>)> {
+    if !owns_session(&state, &user.uid, &id).await {
+        return Err(json_err(StatusCode::NOT_FOUND, "session not found"));
+    }
+    let db = state.db_path.clone();
+    let session_id = id.clone();
+    let token = tokio::task::spawn_blocking(move || share_token_for_session(&db, &session_id))
+        .await
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let Some(token) = token else {
+        return Err(json_err(StatusCode::NOT_FOUND, "not shared"));
+    };
+    Ok(Json(ShareResponse {
+        url: share_url(&headers, &token),
+        token,
+    }))
+}
+
+/// Public: resolve a view-link token to the session it watches.
+pub async fn resolve_share(
+    State(state): State<AppState>,
+    Path(token): Path<String>,
+) -> Result<Json<ShareLookup>, (StatusCode, Json<serde_json::Value>)> {
+    let db = state.db_path.clone();
+    let tok = token.clone();
+    let session_id = tokio::task::spawn_blocking(move || share_session_for_token(&db, &tok))
+        .await
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let Some(session_id) = session_id else {
+        return Err(json_err(StatusCode::NOT_FOUND, "unknown view link"));
+    };
+    Ok(Json(ShareLookup {
+        session_id,
+        read_only: true,
     }))
 }
 
@@ -436,13 +487,68 @@ fn revoke_shares(db: &std::path::Path, session_id: &str) -> anyhow::Result<()> {
 }
 
 fn share_matches(db: &std::path::Path, token: &str, session_id: &str) -> anyhow::Result<bool> {
+    Ok(share_session_for_token(db, token)?.as_deref() == Some(session_id))
+}
+
+fn share_session_for_token(db: &std::path::Path, token: &str) -> anyhow::Result<Option<String>> {
     let conn = Connection::open(db)?;
-    let n: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM shares WHERE token = ?1 AND session_id = ?2",
-        rusqlite::params![token, session_id],
-        |r| r.get(0),
-    )?;
-    Ok(n > 0)
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT session_id FROM shares WHERE token = ?1",
+            [token],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found)
+}
+
+fn share_token_for_session(
+    db: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<Option<String>> {
+    let conn = Connection::open(db)?;
+    let found: Option<String> = conn
+        .query_row(
+            "SELECT token FROM shares WHERE session_id = ?1",
+            [session_id],
+            |r| r.get(0),
+        )
+        .optional()?;
+    Ok(found)
+}
+
+fn public_origin(headers: &HeaderMap) -> Option<String> {
+    let host = headers
+        .get("x-forwarded-host")
+        .or_else(|| headers.get(axum::http::header::HOST))
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|h| !h.is_empty())?;
+    let forwarded = headers
+        .get("x-forwarded-proto")
+        .and_then(|v| v.to_str().ok())
+        .and_then(|s| s.split(',').next())
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let proto = forwarded.unwrap_or_else(|| {
+        if host.starts_with("localhost")
+            || host.starts_with("127.")
+            || host.starts_with("[::1]")
+            || host.starts_with("0.0.0.0")
+        {
+            "http"
+        } else {
+            "https"
+        }
+    });
+    Some(format!("{proto}://{host}"))
+}
+
+fn share_url(headers: &HeaderMap, token: &str) -> String {
+    match public_origin(headers) {
+        Some(origin) => format!("{origin}/s/{token}"),
+        None => format!("/s/{token}"),
+    }
 }
 
 async fn handle_stream(
@@ -549,5 +655,66 @@ async fn handle_stream(
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::http::HeaderValue;
+
+    fn temp_share_db() -> std::path::PathBuf {
+        let path = std::env::temp_dir().join(format!("cascade-share-{}.db", Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        init_share_tables(&conn).unwrap();
+        path
+    }
+
+    #[test]
+    fn mint_lookup_revoke_share() {
+        let path = temp_share_db();
+        let token = mint_share(&path, "sess-1").unwrap();
+        assert_eq!(
+            share_session_for_token(&path, &token).unwrap().as_deref(),
+            Some("sess-1")
+        );
+        assert_eq!(
+            share_token_for_session(&path, "sess-1").unwrap().as_deref(),
+            Some(token.as_str())
+        );
+        assert!(share_matches(&path, &token, "sess-1").unwrap());
+        assert!(!share_matches(&path, &token, "other").unwrap());
+        revoke_shares(&path, "sess-1").unwrap();
+        assert!(share_session_for_token(&path, &token).unwrap().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn reminting_replaces_old_token() {
+        let path = temp_share_db();
+        let first = mint_share(&path, "sess-1").unwrap();
+        let second = mint_share(&path, "sess-1").unwrap();
+        assert_ne!(first, second);
+        assert!(share_session_for_token(&path, &first).unwrap().is_none());
+        assert_eq!(
+            share_session_for_token(&path, &second).unwrap().as_deref(),
+            Some("sess-1")
+        );
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn share_url_uses_forwarded_host() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-host",
+            HeaderValue::from_static("wickrunner.com:7701"),
+        );
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert_eq!(
+            share_url(&headers, "tok"),
+            "https://wickrunner.com:7701/s/tok"
+        );
+        assert_eq!(share_url(&HeaderMap::new(), "tok"), "/s/tok");
     }
 }

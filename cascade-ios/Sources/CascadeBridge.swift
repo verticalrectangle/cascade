@@ -4,6 +4,9 @@
 //  Replaces Enclave's collab-guest transport (EngineBridge.swift) with the
 //  cascade cloud API:
 //    POST /auth/login            → {token}          (JWT, 30d)
+//    POST /auth/register         → {token}          (invite-gated)
+//    POST /sessions/{id}/share   → {token,url}      (view link)
+//    GET  /s/{token}             → {session_id, read_only}
 //    GET  /machines              → [MachineInfo]
 //    GET  /sessions              → [SessionMeta]
 //    POST /sessions              → {id}             (spawn on a machine)
@@ -183,9 +186,11 @@ final class CascadeClient: ObservableObject {
         let token: String
         let sessionId: String
         let name: String
+        let readOnly: Bool
         /// Pre-set when attaching to an existing session (skips login+list).
-        init(base: URL, token: String, sessionId: String, name: String) {
+        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false) {
             self.base = base; self.token = token; self.sessionId = sessionId; self.name = name
+            self.readOnly = readOnly
         }
     }
 
@@ -214,6 +219,117 @@ final class CascadeClient: ObservableObject {
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
               let tok = obj["token"] as? String else { throw BridgeError.badResponse }
         return Account(base: base, token: tok, email: email)
+    }
+
+    /// Create an account with an invite, then persist like login.
+    static func register(base: URL, email: String, password: String, invite: String) async throws -> Account {
+        var req = URLRequest(url: base.appendingPathComponent("auth/register"))
+        req.httpMethod = "POST"
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = Wire.body(["email": email, "password": password, "invite": invite]).data(using: .utf8)
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch { throw BridgeError.network(String(describing: error)) }
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let tok = obj["token"] as? String else { throw BridgeError.badResponse }
+        return Account(base: base, token: tok, email: email)
+    }
+
+    struct ShareInfo: Equatable {
+        let token: String
+        let url: String
+    }
+
+    static func createShare(account: Account, sessionId: String) async throws -> ShareInfo {
+        var req = URLRequest(url: account.base
+            .appendingPathComponent("sessions")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("share"))
+        req.httpMethod = "POST"
+        req.setValue("Bearer \(account.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch { throw BridgeError.network(String(describing: error)) }
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = obj["token"] as? String,
+              let url = obj["url"] as? String else { throw BridgeError.badResponse }
+        return ShareInfo(token: token, url: absolutizeShareURL(url, base: account.base))
+    }
+
+    static func deleteShare(account: Account, sessionId: String) async throws {
+        var req = URLRequest(url: account.base
+            .appendingPathComponent("sessions")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("share"))
+        req.httpMethod = "DELETE"
+        req.setValue("Bearer \(account.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch { throw BridgeError.network(String(describing: error)) }
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        guard http.statusCode < 300 else { throw daemonError(data, status: http.statusCode) }
+    }
+
+    static func getShare(account: Account, sessionId: String) async throws -> ShareInfo? {
+        var req = URLRequest(url: account.base
+            .appendingPathComponent("sessions")
+            .appendingPathComponent(sessionId)
+            .appendingPathComponent("share"))
+        req.setValue("Bearer \(account.token)", forHTTPHeaderField: "Authorization")
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch { throw BridgeError.network(String(describing: error)) }
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        if http.statusCode == 404 { return nil }
+        guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let token = obj["token"] as? String,
+              let url = obj["url"] as? String else { throw BridgeError.badResponse }
+        return ShareInfo(token: token, url: absolutizeShareURL(url, base: account.base))
+    }
+
+    static func resolveShare(base: URL, token: String) async throws -> String {
+        var req = URLRequest(url: base.appendingPathComponent("s").appendingPathComponent(token))
+        let (data, resp): (Data, URLResponse)
+        do { (data, resp) = try await URLSession.shared.data(for: req) }
+        catch { throw BridgeError.network(String(describing: error)) }
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
+        guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let sessionId = obj["session_id"] as? String, !sessionId.isEmpty else { throw BridgeError.badResponse }
+        return sessionId
+    }
+
+    static func parseShareLink(_ raw: String) -> (base: URL, token: String)? {
+        var s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.isEmpty { return nil }
+        if !s.contains("://") { s = "https://" + s }
+        guard let u = URL(string: s) else { return nil }
+        let parts = u.path.split(separator: "/").map(String.init)
+        guard let i = parts.firstIndex(of: "s"), i + 1 < parts.count else { return nil }
+        let token = parts[i + 1]
+        guard !token.isEmpty, let base = normalizeBase(s) else { return nil }
+        return (base, token)
+    }
+
+    static func absolutizeShareURL(_ url: String, base: URL) -> String {
+        let trimmed = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.hasPrefix("http://") || trimmed.hasPrefix("https://") { return trimmed }
+        let root = base.absoluteString.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        if trimmed.hasPrefix("/") { return root + trimmed }
+        return root + "/" + trimmed
+    }
+
+    static func daemonError(_ data: Data, status: Int) -> BridgeError {
+        if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let msg = obj["error"] as? String, !msg.isEmpty {
+            return .daemon(msg)
+        }
+        return .server(httpStatusCode: status)
     }
 
     static func listSessions(account: Account) async throws -> [RemoteSessionMeta] {
@@ -325,6 +441,7 @@ final class CascadeClient: ObservableObject {
         sessionId = targetId
         title = "new session"
         cwd = "…"
+        readOnly = config.readOnly
     }
 
     /// Attach to a `kind: terminal` session via an omp collab join/view handle.
@@ -476,10 +593,10 @@ final class CascadeClient: ObservableObject {
     // MARK: commands
 
     func sendPrompt(_ text: String, images: [(mime: String, base64: String)] = []) {
+        guard !readOnly else { return }
         let clean = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !clean.isEmpty, images.isEmpty else { return }   // image send not supported by cascade yet
         if let guestSocket {
-            guard !readOnly else { return }
             guestSocket.send(["t": "prompt", "text": clean])
         } else {
             send(Wire.prompt(clean))
@@ -529,10 +646,12 @@ final class CascadeClient: ObservableObject {
 
     /// Switch model. `provider` + `modelId` map 1:1 to omp's set_model RPC.
     func setModel(provider: String, modelId: String) {
+        guard !readOnly else { return }
         send(Wire.setModel(provider: provider, modelId: modelId))
     }
 
     func setThinking(_ level: String) {
+        guard !readOnly else { return }
         send(Wire.setThinking(level))
     }
 

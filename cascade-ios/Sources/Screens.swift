@@ -141,6 +141,8 @@ struct LoginGate: View {
     @State private var customServer = false
     @State private var email = ""
     @State private var password = ""
+    @State private var invite = ""
+    @State private var creating = false
     @State private var busy = false
     @State private var error: String?
 
@@ -150,9 +152,18 @@ struct LoginGate: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("CASCADE").font(.labl(10)).tracking(2).foregroundStyle(t.txtLabel).padding(.bottom, 18)
-                    Text("Sign in.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
-                    Text("Your coding sessions from every computer, in one place.")
-                        .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 22)
+                    Text(creating ? "Create an account." : "Sign in.")
+                        .font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
+                    Text(creating
+                         ? "You'll need an invite from someone already using Cascade."
+                         : "Your coding sessions from every computer, in one place.")
+                        .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 16)
+
+                    HStack(spacing: 8) {
+                        modeChip("Sign in", creating: false)
+                        modeChip("Create account", creating: true)
+                    }
+                    .padding(.bottom, 18)
 
                     if customServer {
                         field(icon: "server.rack", placeholder: "your server address",
@@ -161,7 +172,11 @@ struct LoginGate: View {
                     }
                     field(icon: "envelope", placeholder: "email", text: $email, keyboard: .emailAddress)
                         .padding(.bottom, 10)
-                    SecureField("", text: $password, prompt: Text("password").foregroundStyle(t.txtMuted))
+                    if creating {
+                        field(icon: "ticket", placeholder: "invite code", text: $invite)
+                            .padding(.bottom, 10)
+                    }
+                    SecureField("", text: $password, prompt: Text(creating ? "password · 8+ characters" : "password").foregroundStyle(t.txtMuted))
                         .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
                         .textInputAutocapitalization(.never).autocorrectionDisabled()
                         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true)
@@ -173,18 +188,22 @@ struct LoginGate: View {
                         guard !busy else { return }
                         busy = true; error = nil
                         Task {
-                            error = await app.signIn(base: host, email: email, password: password)
+                            if creating {
+                                error = await app.register(base: host, email: email, password: password, invite: invite)
+                            } else {
+                                error = await app.signIn(base: host, email: email, password: password)
+                            }
                             busy = false
                         }
                     } label: {
                         HStack(spacing: 8) {
-                            if busy { ProgressView().tint(t.accent) } else { Image(systemName: "bolt.fill") }
-                            Text("SIGN IN").font(.labl(11))
+                            if busy { ProgressView().tint(t.accent) } else { Image(systemName: creating ? "person.badge.plus" : "bolt.fill") }
+                            Text(creating ? "CREATE ACCOUNT" : "SIGN IN").font(.labl(11))
                         }
                         .foregroundStyle(t.accent).frame(maxWidth: .infinity).padding(.vertical, 14)
                         .glass(t, 16, active: true, border: false, interactive: false)
                     }.press()
-                    .disabled(email.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty)
+                    .disabled(submitDisabled)
                     .padding(.top, 8)
 
                     Button {
@@ -211,6 +230,24 @@ struct LoginGate: View {
         }
     }
 
+    private var submitDisabled: Bool {
+        if email.trimmingCharacters(in: .whitespaces).isEmpty || password.isEmpty { return true }
+        if creating && invite.trimmingCharacters(in: .whitespaces).isEmpty { return true }
+        return false
+    }
+
+    private func modeChip(_ label: String, creating next: Bool) -> some View {
+        Button {
+            creating = next
+            error = nil
+        } label: {
+            Text(label).font(.labl(11))
+                .foregroundStyle(creating == next ? t.accent : t.txtMuted)
+                .frame(maxWidth: .infinity).padding(.vertical, 10)
+                .glass(t, 16, active: creating == next, border: false, interactive: false)
+        }.press()
+    }
+
     private func field(icon: String, placeholder: String, text: Binding<String>,
                        keyboard: UIKeyboardType = .default, error: Bool = false) -> some View {
         HStack(spacing: 8) {
@@ -220,6 +257,76 @@ struct LoginGate: View {
                 .keyboardType(keyboard).textInputAutocapitalization(.never).autocorrectionDisabled()
         }
         .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true)
+    }
+}
+
+struct OpenShareView: View {
+    @EnvironmentObject var app: AppModel
+    @EnvironmentObject var theme: ThemeStore
+    let onClose: () -> Void
+    private var t: Theme { theme.t }
+    @State private var link = ""
+    @State private var busy = false
+    @State private var error: String?
+
+    var body: some View {
+        ZStack {
+            t.bg.ignoresSafeArea()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 0) {
+                    HStack {
+                        Text("VIEW LINK").font(.labl(10)).tracking(2).foregroundStyle(t.txtLabel)
+                        Spacer()
+                        Button(action: onClose) { Image(systemName: "xmark").font(.system(size: 20)).foregroundStyle(t.txt) }
+                    }.padding(.bottom, 18)
+
+                    Text("Open a\nshared view.").font(.disp(34)).foregroundStyle(t.txt).textCase(.uppercase).padding(.bottom, 12)
+                    Text("Paste a view link to watch a session. You won't be able to type.")
+                        .font(.bodyF(14)).foregroundStyle(t.txtBody).padding(.bottom, 22)
+
+                    if let err = error { Text(err).font(.term(12)).foregroundStyle(t.cAdvisor).padding(.bottom, 16) }
+
+                    HStack(spacing: 8) {
+                        Image(systemName: "link").font(.system(size: 15)).foregroundStyle(t.txtMuted)
+                        TextField("", text: $link, prompt: Text("paste a view link").foregroundStyle(t.txtMuted))
+                            .font(.term(14)).foregroundStyle(t.txt).tint(t.accent)
+                            .keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                            .textContentType(.URL)
+                    }
+                    .padding(.horizontal, 12).padding(.vertical, 11).glass(t, 16, flat: true)
+                    .padding(.bottom, 10)
+
+                    Button {
+                        if let s = UIPasteboard.general.string {
+                            let t = s.trimmingCharacters(in: .whitespacesAndNewlines)
+                            if !t.isEmpty { link = t }
+                        }
+                    } label: {
+                        Text("Paste from clipboard").font(.bodyF(12)).foregroundStyle(t.txtMuted)
+                    }
+                    .padding(.bottom, 16)
+
+                    Button {
+                        guard !busy else { return }
+                        busy = true; error = nil
+                        Task {
+                            error = await app.openSharedLink(link)
+                            busy = false
+                            if error == nil { onClose() }
+                        }
+                    } label: {
+                        HStack(spacing: 8) {
+                            if busy { ProgressView().tint(t.accent) } else { Image(systemName: "eye") }
+                            Text("OPEN").font(.labl(11))
+                        }
+                        .foregroundStyle(t.accent).frame(maxWidth: .infinity).padding(.vertical, 14)
+                        .glass(t, 16, active: true, border: false, interactive: false)
+                    }.press()
+                    .disabled(link.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                }.padding(22)
+            }
+        }
+        .preferredColorScheme(theme.preferredScheme)
     }
 }
 
