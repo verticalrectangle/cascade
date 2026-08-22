@@ -253,10 +253,15 @@ final class CollabGuestSocket: NSObject, URLSessionWebSocketDelegate {
     }
 
     func send(_ frame: [String: Any]) {
-        guard let sealed = CollabSeal.seal(link.key, frame) else { return }
+        guard let sealed = CollabSeal.seal(link.key, frame) else {
+            NSLog("[collab] seal failed for t=%@", frame["t"] as? String ?? "?")
+            return
+        }
         var env = Data(count: CollabWire.envelopeHeader)   // peerId 0 BE
         env.append(sealed)
-        task?.send(.data(env)) { _ in }
+        task?.send(.data(env)) { err in
+            if let err { NSLog("[collab] send error: %@", err.localizedDescription) }
+        }
     }
 
     private func openOnce() {
@@ -279,6 +284,7 @@ final class CollabGuestSocket: NSObject, URLSessionWebSocketDelegate {
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didOpenWithProtocol proto: String?) {
         guard webSocketTask === task else { return }
         reconnectAttempt = 0
+        NSLog("[collab] ws opened, sending hello name=%@", displayName)
         sendHello()
         onOpen?()
     }
@@ -306,11 +312,14 @@ final class CollabGuestSocket: NSObject, URLSessionWebSocketDelegate {
             case .success(let message):
                 switch message {
                 case .data(let data):
+                    NSLog("[collab] binary frame %d bytes", data.count)
                     if data.count > CollabWire.envelopeHeader {
                         let payload = data.subdata(in: CollabWire.envelopeHeader..<data.count)
                         if let frame = CollabSeal.open(self.link.key, payload) {
+                            NSLog("[collab] frame t=%@", frame["t"] as? String ?? "?")
                             self.onFrame?(frame)
                         } else {
+                            NSLog("[collab] DECRYPT FAILED")
                             self.fail("bad key or corrupted frame", fatal: true)
                             return
                         }
