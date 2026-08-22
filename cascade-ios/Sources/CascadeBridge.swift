@@ -708,7 +708,11 @@ final class CascadeClient: ObservableObject {
         case "todo_changed":
             if let phases = f["phases"] as? [[String: Any]] { plan = Self.parsePlan(phases) }
         case "ui_request":
-            if let req = decodeUiRequest(f) { pendingRequest = req }
+            // Only real user-facing asks get cards: set_widget/set_title/notify and
+            // friends are chrome-only side channels that must not block the transcript.
+            if let req = decodeUiRequest(f), ["select", "confirm", "input", "editor"].contains(req.method) {
+                pendingRequest = req
+            }
         case "ui_request_cancelled":
             if let tid = f["target_id"] as? String, pendingRequest?.id == tid { pendingRequest = nil }
         case "notice":
