@@ -124,9 +124,11 @@ final class CascadeClient: ObservableObject {
     // Kept for view compatibility; permanently off over the cloud transport.
     @Published private(set) var enhanced = false
     @Published private(set) var canSendImages = false
+    @Published private(set) var commands: [CascadeCommand] = []
+    @Published var awaitingVision = false
+    var sawWorking = false
     // Model identity, split for clean display: "provider / model".
     @Published private(set) var providerName = ""
-    @Published private(set) var modelName = ""
     @Published private(set) var thinkingLevel = ""
     @Published private(set) var availableModels: [ModelOption] = []
     @Published private(set) var thinkingLevels: [String] = ["off", "minimal", "low", "medium", "high"]

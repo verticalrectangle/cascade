@@ -48,7 +48,7 @@ final class SessionVM: ObservableObject {
 
     private func syncLive() {
         if turns != live.turns { turns = live.turns }
-        if live.working { sawWorking = true } else if sawWorking { awaitingVision = false; sawWorking = false }
+        if live.working { live.sawWorking = true } else if live.sawWorking { live.awaitingVision = false; live.sawWorking = false }
         let waiting = turns.contains { $0.type == .ask }
         let status = CascadeStatus.from(phase: live.phase, working: live.working, waiting: waiting)
         let action: String
