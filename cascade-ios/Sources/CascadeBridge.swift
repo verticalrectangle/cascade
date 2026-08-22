@@ -245,9 +245,17 @@ final class CascadeClient: ObservableObject {
         req.setValue("application/json", forHTTPHeaderField: "Content-Type")
         req.httpBody = Wire.createSession(machine: machine, cwd: cwd, model: model).data(using: .utf8)
         let (data, resp) = try await URLSession.shared.data(for: req)
-        guard let http = resp as? HTTPURLResponse, http.statusCode == 200,
+        guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
+        guard http.statusCode == 200,
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let id = obj["id"] as? String else { throw BridgeError.badResponse }
+              let id = obj["id"] as? String else {
+            // Surface the daemon's own error text when present.
+            if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+               let msg = obj["error"] as? String {
+                throw BridgeError.daemon(msg)
+            }
+            throw BridgeError.server(httpStatusCode: http.statusCode)
+        }
         return id
     }
 
@@ -272,6 +280,7 @@ final class CascadeClient: ObservableObject {
             case .invalidCredentials: return "invalid email or password"
             case .network(let why): return "can't reach the host — \(why)"
             case .badResponse: return "the host sent something unexpected"
+            case .daemon(let msg): return msg
             case .server(let code): return "host error · HTTP \(code)"
             }
         }

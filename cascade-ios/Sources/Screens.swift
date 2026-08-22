@@ -221,7 +221,7 @@ struct SpawnView: View {
     @EnvironmentObject var theme: ThemeStore
     let onClose: () -> Void
     private var t: Theme { theme.t }
-    @State private var cwd = "~/dev"
+    @State private var cwd = ""
     @State private var model = ""
     @State private var busy = false
     @State private var error: String?
