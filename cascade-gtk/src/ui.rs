@@ -276,6 +276,29 @@ pub struct Ui {
     local_mode: bool,
 }
 
+/// Display name for a session: live omp title → cwd basename → short id.
+fn session_display_name(m: &SessionMeta) -> String {
+    if let Some(name) = m.name.as_deref().filter(|n| !n.trim().is_empty()) {
+        return name.to_string();
+    }
+    std::path::Path::new(&m.cwd)
+        .file_name()
+        .map(|f| f.to_string_lossy().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| format!("session {}", &m.id[..8.min(m.id.len())]))
+}
+
+/// Window title: bare session name while attached, "cascade" at the rail.
+fn set_window_title(u: &Ui) {
+    let title = u
+        .selected_id
+        .as_deref()
+        .and_then(|id| u.metas.iter().find(|m| m.id == id))
+        .map(session_display_name)
+        .unwrap_or_else(|| "cascade".to_string());
+    u.window.set_title(Some(&title));
+}
+
 pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_channel::Receiver<UiMsg>) {
     let settings = Settings::load();
 
@@ -1619,17 +1642,7 @@ fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &SessionMeta) -> GtkBox {
     }
 
     let top = GtkBox::new(Orientation::Horizontal, 6);
-    let title = meta
-        .name
-        .clone()
-        .unwrap_or_else(|| {
-            meta.cwd
-                .rsplit('/')
-                .next()
-                .filter(|s| !s.is_empty())
-                .unwrap_or(&meta.cwd)
-                .to_string()
-        });
+    let title = session_display_name(meta);
     let t = Label::new(Some(&title));
     t.add_css_class("rail-row-title");
     t.set_xalign(0.0);
@@ -1762,6 +1775,7 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             u.selected_id = None;
             u.attached_kind = None;
             u.status_label.set_text("connecting…");
+            u.window.set_title(Some("cascade"));
             clear_box(&u.durable_box);
             clear_box(&u.live_box);
             u.buffers.clear();
@@ -1788,10 +1802,10 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                     .metas
                     .iter()
                     .find(|m| m.id == id)
-                    .and_then(|m| m.name.clone())
+                    .map(session_display_name)
                     .unwrap_or_else(|| format!("session {}", &id[..8.min(id.len())]));
                 u.status_label.set_text(&title);
-                u.window.set_title(Some(&format!("cascade — {title}")));
+                set_window_title(&u);
                 let model = u.session_models.get(&id).cloned();
                 match model {
                     Some(m) => {
@@ -2112,12 +2126,12 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         }
         SessionEvent::SessionInfo { title, session_id } => {
             let mut u = ui.borrow_mut();
+            if let Some(meta) = u.metas.iter_mut().find(|m| m.id == session_id) {
+                meta.name = Some(title.clone());
+            }
             if u.selected_id.as_deref() == Some(session_id.as_str()) {
                 u.status_label.set_text(&title);
-                u.window.set_title(Some(&format!("cascade — {title}")));
-            }
-            if let Some(meta) = u.metas.iter_mut().find(|m| m.id == session_id) {
-                meta.name = Some(title);
+                set_window_title(&u);
             }
             drop(u);
             render_rail(ui);
@@ -2216,9 +2230,9 @@ fn show_ui_request(ui: &Rc<RefCell<Ui>>, req: UiRequest) {
         }
         UiMethod::SetTitle => {
             if let Some(t) = req.title.or(req.message.clone()) {
-                let u = ui.borrow_mut();
+                let mut u = ui.borrow_mut();
                 u.status_label.set_text(&t);
-                u.window.set_title(Some(&format!("cascade — {t}")));
+                set_window_title(&u);
             }
             let _ = ui.borrow().cmd.try_send(Cmd::Answer {
                 request_id: req.id,
