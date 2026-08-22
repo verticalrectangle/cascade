@@ -272,6 +272,7 @@ final class CascadeClient: ObservableObject {
         case invalidCredentials
         case network(String)
         case badResponse
+        case daemon(String)
         case server(httpStatusCode: Int)
 
         var errorDescription: String? {
