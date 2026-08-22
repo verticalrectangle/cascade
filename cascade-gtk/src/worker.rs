@@ -116,6 +116,13 @@ pub enum Cmd {
         email: String,
         password: String,
     },
+    Register {
+        email: String,
+        password: String,
+        invite: String,
+    },
+    ShareSession,
+    UnshareSession,
     Logout,
     SaveCloudUrl(String),
     RefreshSessions,
@@ -153,6 +160,13 @@ pub enum UiMsg {
     },
     LoggedIn {
         url: String,
+    },
+    ShareLink {
+        session_id: String,
+        url: String,
+    },
+    SharingStopped {
+        session_id: String,
     },
     SessionList(Vec<SessionMeta>),
     Attached {
@@ -257,38 +271,114 @@ pub async fn worker(
             Cmd::Login { email, password } => {
                 match CloudClient::login(&settings.cloud_url, &email, &password).await {
                     Ok(token) => {
-                        settings.token = Some(token.clone());
-                        let _ = settings.save();
-                        match CloudClient::connect(&settings.cloud_url, &token).await {
-                            Ok(c) => {
-                                cloud = Some(c);
-                                let _ = ui_tx
-                                    .send(UiMsg::LoggedIn {
-                                        url: settings.cloud_url.clone(),
-                                    })
-                                    .await;
-                                push_sessions(
-                                    &manager,
-                                    cloud.as_ref(),
-                                    &mut terminal_links,
-                                    &ui_tx,
-                                )
-                                .await;
-                            }
-                            Err(e) => {
-                                let _ = ui_tx
-                                    .send(UiMsg::NeedLogin {
-                                        error: Some(format!("connect failed: {e:#}")),
-                                    })
-                                    .await;
-                            }
-                        }
+                        apply_token(
+                            token,
+                            &mut settings,
+                            &mut cloud,
+                            &manager,
+                            &mut terminal_links,
+                            &ui_tx,
+                        )
+                        .await;
                     }
                     Err(e) => {
                         let _ = ui_tx
                             .send(UiMsg::NeedLogin {
                                 error: Some(format!("{e:#}")),
                             })
+                            .await;
+                    }
+                }
+            }
+            Cmd::Register {
+                email,
+                password,
+                invite,
+            } => {
+                match CloudClient::register(&settings.cloud_url, &email, &password, &invite).await {
+                    Ok(token) => {
+                        apply_token(
+                            token,
+                            &mut settings,
+                            &mut cloud,
+                            &manager,
+                            &mut terminal_links,
+                            &ui_tx,
+                        )
+                        .await;
+                    }
+                    Err(e) => {
+                        let _ = ui_tx
+                            .send(UiMsg::NeedLogin {
+                                error: Some(e.to_string()),
+                            })
+                            .await;
+                    }
+                }
+            }
+            Cmd::ShareSession => {
+                let Some(client) = cloud.as_ref() else {
+                    let _ = ui_tx
+                        .send(UiMsg::Error("not connected to cloud".into()))
+                        .await;
+                    continue;
+                };
+                match current.as_ref() {
+                    Some(SessionBackend::Cloud { session_id, .. }) => {
+                        match client.share_session(session_id).await {
+                            Ok(url) => {
+                                let _ = ui_tx
+                                    .send(UiMsg::ShareLink {
+                                        session_id: session_id.clone(),
+                                        url,
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = ui_tx
+                                    .send(UiMsg::Error(format!("share: {e:#}")))
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = ui_tx
+                            .send(UiMsg::Error(
+                                "share is only available for cloud sessions".into(),
+                            ))
+                            .await;
+                    }
+                }
+            }
+            Cmd::UnshareSession => {
+                let Some(client) = cloud.as_ref() else {
+                    let _ = ui_tx
+                        .send(UiMsg::Error("not connected to cloud".into()))
+                        .await;
+                    continue;
+                };
+                match current.as_ref() {
+                    Some(SessionBackend::Cloud { session_id, .. }) => {
+                        match client.unshare_session(session_id).await {
+                            Ok(()) => {
+                                let _ = ui_tx
+                                    .send(UiMsg::SharingStopped {
+                                        session_id: session_id.clone(),
+                                    })
+                                    .await;
+                            }
+                            Err(e) => {
+                                let _ = ui_tx
+                                    .send(UiMsg::Error(format!("unshare: {e:#}")))
+                                    .await;
+                            }
+                        }
+                    }
+                    _ => {
+                        let _ = ui_tx
+                            .send(UiMsg::Error(
+                                "share is only available for cloud sessions".into(),
+                            ))
                             .await;
                     }
                 }
@@ -594,6 +684,36 @@ pub async fn worker(
                     }
                 }
             }
+        }
+    }
+}
+
+async fn apply_token(
+    token: String,
+    settings: &mut Settings,
+    cloud: &mut Option<CloudClient>,
+    manager: &SessionManager,
+    terminal_links: &mut HashMap<String, String>,
+    ui_tx: &async_channel::Sender<UiMsg>,
+) {
+    settings.token = Some(token.clone());
+    let _ = settings.save();
+    match CloudClient::connect(&settings.cloud_url, &token).await {
+        Ok(c) => {
+            *cloud = Some(c);
+            let _ = ui_tx
+                .send(UiMsg::LoggedIn {
+                    url: settings.cloud_url.clone(),
+                })
+                .await;
+            push_sessions(manager, cloud.as_ref(), terminal_links, ui_tx).await;
+        }
+        Err(e) => {
+            let _ = ui_tx
+                .send(UiMsg::NeedLogin {
+                    error: Some(format!("connect failed: {e:#}")),
+                })
+                .await;
         }
     }
 }

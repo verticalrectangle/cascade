@@ -227,6 +227,14 @@ pub struct Ui {
     login_error: Label,
     email: Entry,
     password: PasswordEntry,
+    invite: Entry,
+    login_btn: Button,
+    login_mode_link: Button,
+    login_sub: Label,
+    share_btn: Button,
+    unshare_btn: Button,
+    registering: Cell<bool>,
+    sharing: HashSet<String>,
     status_label: Label,
     model_pill: Label,
     inbox_btn: MenuButton,
@@ -618,11 +626,17 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     password.add_css_class("login-entry");
     password.set_show_peek_icon(true);
     password.set_placeholder_text(Some("password"));
+    let invite = Entry::new();
+    invite.add_css_class("login-entry");
+    invite.set_placeholder_text(Some("invite code"));
+    invite.set_visible(false);
     let login_btn = Button::with_label("Sign in");
     login_btn.add_css_class("login-button");
     let login_error = Label::new(None);
     login_error.add_css_class("login-error");
     login_error.set_wrap(true);
+    let login_mode_link = Button::with_label("Create account");
+    login_mode_link.add_css_class("login-link");
     let local_link = Button::with_label("Use locally without account");
     local_link.add_css_class("login-link");
 
@@ -630,8 +644,10 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     login_card.append(&login_sub);
     login_card.append(&email);
     login_card.append(&password);
+    login_card.append(&invite);
     login_card.append(&login_btn);
     login_card.append(&login_error);
+    login_card.append(&login_mode_link);
     login_card.append(&local_link);
     login_overlay.append(&login_card);
     login_overlay.set_valign(gtk4::Align::Fill);
@@ -677,11 +693,19 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     save_url_btn.add_css_class("flat-btn");
     let logout_btn = Button::with_label("Log out");
     logout_btn.add_css_class("flat-btn");
+    let share_btn = Button::with_label("Share view link");
+    share_btn.add_css_class("flat-btn");
+    share_btn.set_visible(false);
+    let unshare_btn = Button::with_label("Stop sharing");
+    unshare_btn.add_css_class("flat-btn");
+    unshare_btn.set_visible(false);
     sp_col.append(&dark_check);
     sp_col.append(&sidebar_check);
     sp_col.append(&sp_sep);
     sp_col.append(&url_row);
     sp_col.append(&save_url_btn);
+    sp_col.append(&share_btn);
+    sp_col.append(&unshare_btn);
     sp_col.append(&logout_btn);
     settings_pop.set_child(Some(&sp_col));
     settings_btn.set_popover(Some(&settings_pop));
@@ -696,6 +720,14 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         login_error,
         email: email.clone(),
         password: password.clone(),
+        invite: invite.clone(),
+        login_btn: login_btn.clone(),
+        login_mode_link: login_mode_link.clone(),
+        login_sub: login_sub.clone(),
+        share_btn: share_btn.clone(),
+        unshare_btn: unshare_btn.clone(),
+        registering: Cell::new(false),
+        sharing: HashSet::new(),
         status_label,
         model_pill,
         inbox_btn: inbox_btn.clone(),
@@ -768,6 +800,15 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     logout_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
         let _ = ui.borrow().cmd.try_send(Cmd::Logout);
     }));
+    share_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+        let _ = ui.borrow().cmd.try_send(Cmd::ShareSession);
+    }));
+    unshare_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+        let _ = ui.borrow().cmd.try_send(Cmd::UnshareSession);
+    }));
+    settings_pop.connect_show(glib::clone!(#[strong] ui, move |_| {
+        sync_share_buttons(&ui);
+    }));
 
     // inbox: opening the dropdown clears unseen entries
     inbox_btn.connect_notify_local(Some("active"), glib::clone!(#[strong] ui, move |btn, _| {
@@ -780,6 +821,11 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     // login
     login_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| do_login(&ui)));
     password.connect_activate(glib::clone!(#[strong] ui, move |_| do_login(&ui)));
+    invite.connect_activate(glib::clone!(#[strong] ui, move |_| do_login(&ui)));
+    login_mode_link.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+        let next = !ui.borrow().registering.get();
+        apply_registering(&ui.borrow(), next);
+    }));
     local_link.connect_clicked(glib::clone!(#[strong] ui, move |_| {
         let mut u = ui.borrow_mut();
         u.local_mode = true;
@@ -1030,7 +1076,44 @@ fn do_login(ui: &Rc<RefCell<Ui>>) {
     let email = u.email.text().to_string();
     let password = u.password.text().to_string();
     u.login_error.set_text("");
-    let _ = u.cmd.try_send(Cmd::Login { email, password });
+    if u.registering.get() {
+        let invite = u.invite.text().to_string();
+        let _ = u.cmd.try_send(Cmd::Register {
+            email,
+            password,
+            invite,
+        });
+    } else {
+        let _ = u.cmd.try_send(Cmd::Login { email, password });
+    }
+}
+
+fn apply_registering(u: &Ui, on: bool) {
+    u.registering.set(on);
+    u.invite.set_visible(on);
+    if on {
+        u.login_btn.set_label("Create account");
+        u.login_mode_link.set_label("Sign in");
+        u.login_sub.set_text("Create an account with an invite code.");
+    } else {
+        u.login_btn.set_label("Sign in");
+        u.login_mode_link.set_label("Create account");
+        u.login_sub.set_text("Sign in to sync sessions across machines.");
+    }
+    u.login_error.set_text("");
+}
+
+fn sync_share_buttons(ui: &Rc<RefCell<Ui>>) {
+    let u = ui.borrow();
+    let cloud = u.attached_kind == Some(BackendKind::Cloud);
+    let shared = match &u.selected_id {
+        Some(id) => u.sharing.contains(id),
+        None => false,
+    };
+    u.share_btn
+        .set_visible(cloud && u.selected_id.is_some() && !shared);
+    u.unshare_btn
+        .set_visible(cloud && u.selected_id.is_some() && shared);
 }
 
 fn toggle_rail(ui: &Rc<RefCell<Ui>>) {
@@ -1774,11 +1857,15 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             u.login_error.set_text("");
             u.selected_id = None;
             u.attached_kind = None;
+            u.sharing.clear();
+            apply_registering(&u, false);
             u.status_label.set_text("connecting…");
             u.window.set_title(Some("cascade"));
             clear_box(&u.durable_box);
             clear_box(&u.live_box);
             u.buffers.clear();
+            drop(u);
+            sync_share_buttons(ui);
         }
         UiMsg::SessionList(list) => {
             ui.borrow_mut().metas = list;
@@ -1832,6 +1919,18 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                 apply_snapshot(ui, snap);
             }
             let _ = ui.borrow().cmd.try_send(Cmd::RefreshState);
+            sync_share_buttons(ui);
+        }
+        UiMsg::ShareLink { session_id, url } => {
+            copy_text(&url);
+            show_toast(ui, &url);
+            ui.borrow_mut().sharing.insert(session_id);
+            sync_share_buttons(ui);
+        }
+        UiMsg::SharingStopped { session_id } => {
+            show_toast(ui, "stopped sharing");
+            ui.borrow_mut().sharing.remove(&session_id);
+            sync_share_buttons(ui);
         }
         UiMsg::Event(ev) => handle_event(ui, ev),
         UiMsg::Toast(t) => show_toast(ui, &t),

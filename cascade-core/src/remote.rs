@@ -62,6 +62,36 @@ impl CloudClient {
             .ok_or_else(|| anyhow!("login response missing token: {body}"))
     }
 
+    pub async fn register(
+        base_url: &str,
+        email: &str,
+        password: &str,
+        invite: &str,
+    ) -> Result<String> {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let http = reqwest::Client::new();
+        let url = join_url(base_url, "/auth/register");
+        let resp = http
+            .post(&url)
+            .json(&serde_json::json!({
+                "email": email,
+                "password": password,
+                "invite": invite,
+            }))
+            .send()
+            .await
+            .context("POST /auth/register")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            anyhow::bail!("{}", json_error_message(&body));
+        }
+        body.get("token")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+            .ok_or_else(|| anyhow!("register response missing token: {body}"))
+    }
+
     pub async fn connect(base_url: &str, token: &str) -> Result<Self> {
         let _ = rustls::crypto::ring::default_provider().install_default();
         let mut headers = reqwest::header::HeaderMap::new();
@@ -255,6 +285,63 @@ impl CloudClient {
             }
         });
         Ok((ev_rx, cmd_tx))
+    }
+
+    pub async fn share_session(&self, session_id: &str) -> Result<String> {
+        let url = join_url(&self.base_url, &format!("/sessions/{session_id}/share"));
+        let resp = self
+            .http
+            .post(&url)
+            .send()
+            .await
+            .context("POST /sessions/:id/share")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            anyhow::bail!("{}", json_error_message(&body));
+        }
+        let raw = body
+            .get("url")
+            .and_then(|u| u.as_str())
+            .ok_or_else(|| anyhow!("share response missing url: {body}"))?;
+        Ok(absolute_url(&self.base_url, raw))
+    }
+
+    pub async fn unshare_session(&self, session_id: &str) -> Result<()> {
+        let url = join_url(&self.base_url, &format!("/sessions/{session_id}/share"));
+        let resp = self
+            .http
+            .delete(&url)
+            .send()
+            .await
+            .context("DELETE /sessions/:id/share")?;
+        if !resp.status().is_success() {
+            let status = resp.status();
+            let body = resp.text().await.unwrap_or_default();
+            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&body) {
+                anyhow::bail!("{}", json_error_message(&v));
+            }
+            anyhow::bail!("unshare failed ({status}): {body}");
+        }
+        Ok(())
+    }
+}
+
+fn json_error_message(body: &serde_json::Value) -> String {
+    body.get("error")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| body.to_string())
+}
+
+fn absolute_url(base: &str, url: &str) -> String {
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else if url.starts_with('/') {
+        format!("{}{url}", base.trim_end_matches('/'))
+    } else {
+        format!("{}/{url}", base.trim_end_matches('/'))
     }
 }
 
