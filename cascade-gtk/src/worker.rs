@@ -178,6 +178,7 @@ pub enum UiMsg {
         session_id: String,
     },
     SessionList(Vec<ListedSession>),
+    MachineNames(std::collections::HashMap<String, String>),
     Attached {
         id: String,
         kind: BackendKind,
@@ -913,6 +914,14 @@ async fn push_sessions(
     }
     list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     let _ = ui_tx.send(UiMsg::SessionList(list)).await;
+    // Device names for the rail (machine uuid → friendly name).
+    if let Some(c) = cloud {
+        if let Ok(machines) = c.list_machines().await {
+            let names: std::collections::HashMap<String, String> =
+                machines.into_iter().map(|m| (m.id, m.name)).collect();
+            let _ = ui_tx.send(UiMsg::MachineNames(names)).await;
+        }
+    }
 }
 
 async fn attach_cloud(

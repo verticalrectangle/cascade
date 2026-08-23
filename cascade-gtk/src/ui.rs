@@ -247,8 +247,11 @@ impl RailStatus {
 }
 
 fn ended_earlier(m: &ListedSession) -> bool {
-    RailStatus::from_meta(m) == RailStatus::Ended
-        && (chrono::Utc::now() - m.last_active).num_hours() >= 24
+    let ended = RailStatus::from_meta(m) == RailStatus::Ended;
+    // Untitled managed sessions that already ended never did any work —
+    // pure debris, always tucked.
+    let empty_debris = ended && m.kind == "managed" && m.name.is_none();
+    empty_debris || (ended && (chrono::Utc::now() - m.last_active).num_hours() >= 24)
 }
 
 pub struct Ui {
@@ -307,6 +310,7 @@ pub struct Ui {
     selected_id: Option<String>,
     attached_kind: Option<BackendKind>,
     metas: Vec<ListedSession>,
+    machine_names: HashMap<String, String>,
     settings: Settings,
     earlier_collapsed: bool,
     session_models: HashMap<String, String>,
@@ -323,11 +327,28 @@ fn session_display_name(m: &ListedSession) -> String {
     if let Some(name) = m.name.as_deref().filter(|n| !n.trim().is_empty()) {
         return name.to_string();
     }
-    std::path::Path::new(&m.cwd)
-        .file_name()
-        .map(|f| f.to_string_lossy().to_string())
+    // Untitled: an abbreviated path that reads as a place, never a bare home
+    // basename (~/home/alexis → "alexis" reads as a username, not a location).
+    abbreviate_path(&m.cwd)
         .filter(|s| !s.is_empty())
         .unwrap_or_else(|| format!("session {}", &m.id[..8.min(m.id.len())]))
+}
+
+/// "~/dev/cascade" for home-relative paths, full path otherwise; "~" for home.
+fn abbreviate_path(cwd: &str) -> Option<String> {
+    if cwd.is_empty() {
+        return None;
+    }
+    let home = std::env::var("HOME").unwrap_or_default();
+    if !home.is_empty() {
+        if cwd == home {
+            return Some("~".to_string());
+        }
+        if let Some(rest) = cwd.strip_prefix(&format!("{home}/")) {
+            return Some(format!("~/{rest}"));
+        }
+    }
+    Some(cwd.to_string())
 }
 
 /// Window title: bare session name while attached, "cascade" at the rail.
@@ -802,6 +823,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         selected_id: None,
         attached_kind: None,
         metas: Vec::new(),
+        machine_names: HashMap::new(),
         settings,
         earlier_collapsed: true,
         session_models: HashMap::new(),
@@ -1759,11 +1781,19 @@ fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &ListedSession) -> GtkBox {
     top.append(&top_cb);
 
     let sub = GtkBox::new(Orientation::Horizontal, 6);
+    let device = if meta.machine == "cloud" || meta.machine.is_empty() {
+        "cloud server".to_string()
+    } else {
+        u.machine_names
+            .get(&meta.machine)
+            .cloned()
+            .unwrap_or_else(|| meta.machine.clone())
+    };
     let model = u
         .session_models
         .get(&meta.id)
         .cloned()
-        .unwrap_or_else(|| meta.machine.clone());
+        .unwrap_or(device);
     let sub_l = Label::new(Some(&model));
     sub_l.add_css_class("rail-row-sub");
     sub_l.set_xalign(0.0);
@@ -1889,6 +1919,10 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
         }
         UiMsg::SessionList(list) => {
             ui.borrow_mut().metas = list;
+            render_rail(ui);
+        }
+        UiMsg::MachineNames(names) => {
+            ui.borrow_mut().machine_names = names;
             render_rail(ui);
         }
         UiMsg::Attached { id, kind, snapshot, read_only } => {
