@@ -1,0 +1,514 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+<style>
+:root {
+  --base:#faf4ed; --surf:#fffaf3; --over:#f2e9e4; --ink:#2a2740; --text:#575279;
+  --subtle:#797593; --love:#b4637a; --gold:#ea9d34; --pine:#286983; --foam:#56949f;
+  --iris:#907aa9; --hair:#dfdad9; --add:#286983; --del:#b4637a;
+  --mono:"SF Mono",Menlo,"JetBrains Mono",ui-monospace,monospace;
+  --serif:"New York",Charter,Georgia,serif;
+  --sans:ui-sans-serif,system-ui,sans-serif;
+}
+@media (prefers-color-scheme:dark) {
+  :root {
+    --base:#12101a; --surf:#1a1824; --over:#221f2e; --ink:#e8e4d9; --text:#c8c4b8;
+    --subtle:#908caa; --love:#e8919f; --gold:#f6c177; --pine:#9ccfd8; --foam:#56949f;
+    --iris:#c4a7e7; --hair:#393552; --add:#9ccfd8; --del:#eb6f92;
+  }
+}
+* { box-sizing:border-box; border-radius:0; margin:0; padding:0 }
+html,body { height:100% }
+body {
+  background:var(--base); color:var(--text); font:15px/1.55 var(--sans);
+  display:flex; flex-direction:column; min-height:100%;
+}
+a { color:var(--iris) }
+code,pre,.mono,.status,.badge,.expiry,summary b { font-family:var(--mono) }
+header {
+  display:flex; align-items:flex-start; justify-content:space-between; gap:12px;
+  padding:14px 18px; border-bottom:1px solid var(--hair); background:var(--surf);
+  position:sticky; top:0; z-index:3;
+}
+h1 { font:600 18px/1.3 var(--sans); color:var(--ink); max-width:70vw; word-break:break-word }
+.sub { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin-top:6px; font-size:12px }
+.badge,.expiry,.chip {
+  border:1px solid var(--hair); background:var(--over); color:var(--subtle);
+  padding:2px 8px; letter-spacing:.08em; font-size:10px; text-transform:uppercase;
+}
+.badge { color:var(--love); border-color:var(--love) }
+.status { display:flex; align-items:center; gap:8px; font-size:11px; letter-spacing:.12em; color:var(--subtle); flex-shrink:0 }
+.dot { width:8px; height:8px; background:var(--foam) }
+.dot.working { background:var(--gold); animation:pulse 1.2s ease-in-out infinite }
+.dot.ended { background:var(--subtle) }
+@keyframes pulse { 50% { opacity:.3 } }
+#reconnect {
+  background:var(--gold); color:#2a2740; font:12px var(--mono); text-align:center; padding:6px;
+}
+#plan { border-bottom:1px solid var(--hair); padding:10px 18px; background:var(--surf); font-size:13px }
+.phase { color:var(--iris); font:12px var(--mono); letter-spacing:.08em; text-transform:uppercase; margin:6px 0 4px }
+.task { padding:2px 0 2px 14px; position:relative }
+.task::before { content:""; position:absolute; left:0; top:.55em; width:7px; height:7px; background:var(--hair) }
+.task.in_progress::before { background:var(--gold) }
+.task.completed::before { background:var(--foam) }
+.task.abandoned,.task.blocked { color:var(--subtle); text-decoration:line-through }
+#ended {
+  margin:12px 18px 0; border:1px solid var(--love); color:var(--love);
+  padding:10px 12px; font:12px var(--mono); letter-spacing:.08em; text-transform:uppercase;
+}
+#log { flex:1; overflow:auto; padding:18px; max-width:860px; width:100%; margin:0 auto }
+.row { margin:0 0 16px }
+.row.user { display:flex; justify-content:flex-end }
+.bubble {
+  max-width:min(520px,85%); background:var(--surf); border:1px solid var(--hair);
+  padding:10px 13px; white-space:pre-wrap; word-break:break-word;
+}
+.agent { font:17px/1.6 var(--serif); color:var(--ink) }
+.agent p { margin:0 0 .8em }
+.agent p:last-child { margin:0 }
+.fence { background:var(--over); border:1px solid var(--hair); margin:10px 0; overflow:auto }
+.fence .lang { font:10px var(--mono); letter-spacing:.1em; text-transform:uppercase; color:var(--subtle); padding:6px 10px; border-bottom:1px solid var(--hair) }
+.fence pre { padding:10px 12px; font-size:12.5px; color:var(--foam); white-space:pre-wrap }
+code { background:var(--over); padding:1px 4px; color:var(--pine); font-size:.88em }
+.thought, .tool, .ask {
+  font-family:var(--sans); font-size:13px; background:var(--surf);
+  border:1px solid var(--hair); margin:10px 0;
+}
+.thought summary, .tool summary { cursor:pointer; padding:8px 10px; color:var(--subtle) }
+.thought pre { padding:0 10px 10px; white-space:pre-wrap; color:var(--subtle); font-size:12px }
+.tool { border-left:3px solid var(--subtle) }
+.tool.k-edit,.tool.k-write,.tool.k-ast_edit { border-left-color:var(--love) }
+.tool.k-bash,.tool.k-eval { border-left-color:var(--pine) }
+.tool.k-read,.tool.k-search { border-left-color:var(--foam) }
+.tool.k-task { border-left-color:var(--iris) }
+.tool.err { border-left-color:var(--love) }
+.tool.pending { border-left-color:var(--gold) }
+.tool summary b { color:var(--ink); font-size:11px; letter-spacing:.06em; text-transform:uppercase; margin-right:8px }
+.tool .sum { color:var(--subtle); font:12px var(--mono) }
+.lines, .diff { padding:8px 10px 10px; font:12px/1.45 var(--mono); white-space:pre-wrap; overflow:auto; max-height:22em }
+.diff .add { color:var(--add); background:rgba(86,148,159,.14) }
+.diff .del { color:var(--del); background:rgba(180,99,122,.12) }
+.ask { padding:12px; border-left:3px solid var(--gold) }
+.ask-h { display:flex; gap:8px; align-items:center; font:11px var(--mono); letter-spacing:.12em; color:var(--gold); margin-bottom:6px }
+.ask ul { margin:8px 0 0 18px }
+.ask li { margin:3px 0 }
+.img { max-width:min(360px,100%); border:1px solid var(--hair); margin:8px 0; display:block }
+#empty,#unavail {
+  flex:1; display:flex; align-items:center; justify-content:center; text-align:center;
+  padding:40px 24px; color:var(--subtle); max-width:28em; margin:0 auto;
+}
+#empty[hidden],#unavail[hidden],#reconnect[hidden],#plan[hidden],#ended[hidden],#log[hidden] { display:none }
+#toasts { position:fixed; bottom:12px; left:50%; transform:translateX(-50%); display:flex; flex-direction:column; gap:6px; z-index:5; width:min(520px,calc(100% - 24px)) }
+.chip { display:block; background:var(--surf) }
+.chip.lv-error { color:var(--love); border-color:var(--love) }
+.chip.lv-info { color:var(--pine); border-color:var(--pine) }
+@media (max-width:420px) {
+  header, #plan, #log { padding-left:12px; padding-right:12px }
+  h1 { font-size:16px; max-width:100% }
+  header { flex-wrap:wrap }
+  .bubble { max-width:92% }
+  .agent { font-size:16px }
+}
+</style>
+</head>
+<body>
+<div id="reconnect" hidden>reconnecting…</div>
+<header>
+  <div>
+    <h1 id="title">__TITLE__</h1>
+    <div class="sub">
+      <span id="model" class="mono" hidden></span>
+      <span class="badge">READ-ONLY</span>
+      <span class="expiry" id="expiry"></span>
+    </div>
+  </div>
+  <div class="status"><i class="dot" id="dot"></i><span id="stlabel">LIVE</span></div>
+</header>
+<div id="plan" hidden></div>
+<div id="ended" hidden>This session has ended.</div>
+<main id="log" hidden></main>
+<div id="empty" hidden>This session hasn't said anything yet.</div>
+<div id="unavail" hidden>This share link is unavailable (revoked, expired, or the server is down).</div>
+<div id="toasts"></div>
+<script>
+(() => {
+  const TOKEN = "__TOKEN__", SESSION = "__SESSION_ID__", EXPIRES = "__EXPIRES__";
+  const $ = (id) => document.getElementById(id);
+  const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const roleOf = (m) => (m && m.role) || "";
+  const ARG_KEYS = ["path", "file", "filePath", "file_path", "command", "cmd", "pattern", "query", "url", "name"];
+
+  let messages = [], todos = [], pendingAsks = [], notices = [];
+  let streamText = "", streamThink = "", activeTools = {};
+  let working = false, frozen = false, gotSnap = false, model = "", backoff = 1000, ws = null, dirty = false;
+
+  function expiryLabel(raw) {
+    if (!raw || raw === "never") return "no expiry";
+    const t = Date.parse(raw);
+    if (Number.isNaN(t)) return "no expiry";
+    const ms = t - Date.now();
+    if (ms <= 0) return "expires in 0h";
+    return "expires in " + Math.max(1, Math.round(ms / 36e5)) + "h";
+  }
+  $("expiry").textContent = expiryLabel(EXPIRES);
+
+  function fmtModel(m) {
+    if (!m) return "";
+    if (typeof m === "string") return m;
+    if (m.provider && m.id) return m.provider + " / " + m.id;
+    return m.name || m.id || "";
+  }
+  function toolKind(name) {
+    const n = (name || "").toLowerCase();
+    if (n.includes("ast_edit")) return "ast_edit";
+    if (/edit|write|apply/.test(n)) return n.includes("write") ? "write" : "edit";
+    if (/bash|shell|exec|eval/.test(n)) return n.includes("eval") ? "eval" : "bash";
+    if (/read|cat/.test(n)) return "read";
+    if (/grep|search|glob|find/.test(n)) return "search";
+    if (/task|agent|spawn/.test(n)) return "task";
+    return n || "tool";
+  }
+  function argSummary(args) {
+    if (!args || typeof args !== "object" || Array.isArray(args)) return "";
+    for (const k of ARG_KEYS) if (typeof args[k] === "string" && args[k]) return args[k];
+    try { const s = JSON.stringify(args); return s.length <= 60 ? s : ""; } catch { return ""; }
+  }
+  function contentText(content) {
+    if (content == null) return "";
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return content.text || "";
+    return content.map((b) => (b && b.type === "text" ? b.text : typeof b === "string" ? b : "")).filter(Boolean).join("\n");
+  }
+  function thinkText(b) {
+    return (b && (b.thinking || b.text || b.reasoning || b.data || b.content)) || "";
+  }
+  function dataImg(b) {
+    if (!b || b.type !== "image" || !b.data) return "";
+    const mime = String(b.mimeType || b.mime_type || "image/png").replace(/[^\w.+\-\/]/g, "");
+    return "data:" + mime + ";base64," + String(b.data).replace(/[^A-Za-z0-9+/=]/g, "");
+  }
+  function inline(s) {
+    let t = esc(s);
+    t = t.replace(/`([^`]+)`/g, "<code>$1</code>");
+    t = t.replace(/\[([^\]]+)\]\((https?:[^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+    t = t.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+    t = t.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+    return t;
+  }
+  function md(src) {
+    const out = [];
+    const re = /```([^\n`]*)\n?([\s\S]*?)```/g;
+    let last = 0, m;
+    while ((m = re.exec(src))) {
+      if (m.index > last) out.push(prose(src.slice(last, m.index)));
+      out.push('<div class="fence"><div class="lang">' + esc((m[1] || "code").trim() || "code") + "</div><pre>" + esc(m[2].replace(/\n$/, "")) + "</pre></div>");
+      last = re.lastIndex;
+    }
+    if (last < src.length) out.push(prose(src.slice(last)));
+    return out.join("") || prose(src);
+  }
+  function prose(s) {
+    return s.split(/\n{2,}/).filter((p) => p.trim()).map((p) => "<p>" + inline(p).replace(/\n/g, "<br>") + "</p>").join("");
+  }
+  function renderDiff(text) {
+    return '<div class="diff">' + String(text).split("\n").slice(0, 200).map((line) => {
+      const cls = line.startsWith("+") && !line.startsWith("+++") ? "add" : line.startsWith("-") && !line.startsWith("---") ? "del" : "";
+      return '<div class="' + cls + '">' + esc(line) + "</div>";
+    }).join("") + "</div>";
+  }
+  function capLines(text) {
+    const lines = String(text).split("\n");
+    return '<pre class="lines">' + lines.slice(0, 14).map(esc).join("\n") + (lines.length > 14 ? "\n…" : "") + "</pre>";
+  }
+  function resultOf(res) {
+    if (res == null) return { text: "", details: null, content: res };
+    if (typeof res === "string") return { text: res, details: null, content: res };
+    const details = res.details || null;
+    let text = "";
+    if (typeof res.content === "string") text = res.content;
+    else if (Array.isArray(res.content)) text = contentText(res.content);
+    else if (typeof res.text === "string") text = res.text;
+    else if (res.content == null && details == null) {
+      try { text = JSON.stringify(res, null, 2); } catch { text = ""; }
+    }
+    return { text, details, content: res.content };
+  }
+  function toolCard(id, name, args, intent, resultMsg, pending) {
+    const kind = toolKind(name);
+    if (kind === "todo" || name === "todo") return "";
+    const sum = argSummary(args) || intent || "";
+    let body = "";
+    const err = !!(resultMsg && (resultMsg.isError || resultMsg.is_error));
+    if (resultMsg) {
+      const pack = resultOf(resultMsg._result || resultMsg);
+      if (pack.text) body += capLines(pack.text);
+      const img = Array.isArray(pack.content) ? pack.content.map(dataImg).find(Boolean) : "";
+      if (img) body += '<img class="img" alt="" src="' + esc(img) + '">';
+      const details = pack.details || resultMsg.details;
+      if (details && (kind === "edit" || kind === "ast_edit" || kind === "write")) {
+        const diff = details.diff || details.displayContent || "";
+        if (diff) body += renderDiff(diff);
+        (details.perFileResults || []).forEach((f) => {
+          if (f.path) body += '<div class="sum">' + esc(f.path) + "</div>";
+          if (f.diff) body += renderDiff(f.diff);
+        });
+      }
+    } else if (pending && args && !argSummary(args)) {
+      try { body += capLines(JSON.stringify(args, null, 2)); } catch {}
+    }
+    const cls = ["tool", "k-" + kind, pending ? "pending" : "", err ? "err" : ""].filter(Boolean).join(" ");
+    return '<details class="' + cls + '" data-id="' + esc(id) + '" open><summary><b>' + esc(name) + '</b> <span class="sum">' + esc(sum) + "</span></summary>" + body + "</details>";
+  }
+  function userHtml(m) {
+    const text = esc(contentText(m.content));
+    const imgs = Array.isArray(m.content) ? m.content.map(dataImg).filter(Boolean) : [];
+    return '<div class="row user"><div class="bubble">' + text + imgs.map((s) => '<img class="img" alt="" src="' + esc(s) + '">').join("") + "</div></div>";
+  }
+  function assistantHtml(m, results) {
+    const blocks = Array.isArray(m.content) ? m.content : [{ type: "text", text: contentText(m.content) }];
+    let inner = "";
+    for (const b of blocks) {
+      if (!b) continue;
+      if (b.type === "text" && b.text) inner += '<div class="prose">' + md(b.text) + "</div>";
+      else if (b.type === "thinking" || b.type === "redactedThinking" || b.type === "reasoning") {
+        const t = thinkText(b);
+        if (t) inner += '<details class="thought"><summary>thought</summary><pre>' + esc(t) + "</pre></details>";
+      } else if (b.type === "toolCall" || b.type === "tool_call") {
+        const id = b.id || b.toolCallId || "";
+        inner += toolCard(id, b.name || b.toolName, b.arguments || b.args, b.intent, results[id], !results[id]);
+      } else if (b.type === "image") {
+        const src = dataImg(b);
+        if (src) inner += '<img class="img" alt="" src="' + esc(src) + '">';
+      }
+    }
+    if (m.errorMessage) inner += '<div class="chip lv-error">' + esc(m.errorMessage) + "</div>";
+    return inner ? '<div class="row agent">' + inner + "</div>" : "";
+  }
+  function askHtml(req) {
+    if (!req) return "";
+    const method = (req.method || "").toLowerCase();
+    if (["notify", "set_status", "set_widget", "set_title", "open_url"].includes(method)) return "";
+    const q = req.title || req.message || "The agent is asking…";
+    const help = req.title && req.message && req.message !== req.title ? "<p>" + esc(req.message) + "</p>" : "";
+    let opts = Array.isArray(req.options) ? req.options : [];
+    if (method === "confirm" && !opts.length) opts = ["Yes", "No"];
+    const list = opts.length ? "<ul>" + opts.map((o) => "<li>" + esc(o) + "</li>").join("") + "</ul>" : (req.prefill || req.placeholder ? '<p class="sum">' + esc(req.prefill || req.placeholder) + "</p>" : "");
+    return '<section class="ask"><div class="ask-h">ASK <span class="badge">READ-ONLY</span></div><p>' + esc(q) + "</p>" + help + list + "</section>";
+  }
+  function flushStream() {
+    if (!streamText && !streamThink) return;
+    const content = [];
+    if (streamThink) content.push({ type: "thinking", thinking: streamThink });
+    if (streamText) content.push({ type: "text", text: streamText });
+    messages.push({ role: "assistant", content });
+    streamText = ""; streamThink = "";
+  }
+  function project() {
+    const results = {};
+    const claimed = new Set();
+    for (const m of messages) {
+      if (roleOf(m) === "toolResult") {
+        const id = m.toolCallId || m.tool_call_id;
+        if (id) results[id] = m;
+      }
+    }
+    for (const m of messages) {
+      if (roleOf(m) === "assistant") {
+        (Array.isArray(m.content) ? m.content : []).forEach((b) => { if (b && (b.type === "toolCall" || b.type === "tool_call") && (b.id || b.toolCallId)) claimed.add(b.id || b.toolCallId); });
+      }
+    }
+    let html = "";
+    for (const m of messages) {
+      const r = roleOf(m);
+      if (r === "user" || r === "human") html += userHtml(m);
+      else if (r === "assistant" || r === "model") html += assistantHtml(m, results);
+      else if (r === "toolResult") {
+        const id = m.toolCallId || m.tool_call_id;
+        if (id && !claimed.has(id) && m.toolName !== "todo") html += toolCard(id, m.toolName || "tool", m.arguments || m.args, m.intent, m, false);
+      }
+    }
+    for (const [id, t] of Object.entries(activeTools)) {
+      if (!claimed.has(id) && !results[id]) html += toolCard(id, t.name, t.args, t.intent, null, true);
+    }
+    if (streamThink || streamText) {
+      html += '<div class="row agent stream">';
+      if (streamThink) html += '<details class="thought"><summary>thought</summary><pre>' + esc(streamThink) + "</pre></details>";
+      if (streamText) html += '<div class="prose">' + md(streamText) + "</div>";
+      html += "</div>";
+    }
+    pendingAsks.forEach((a) => { html += askHtml(a); });
+    notices.forEach((n) => {
+      html += '<div class="chip lv-' + (n.level === "error" ? "error" : "info") + '">' + esc(n.message) + "</div>";
+    });
+    return html;
+  }
+  function setStatus() {
+    const mode = frozen ? "ended" : working ? "working" : "live";
+    $("dot").className = "dot " + (mode === "live" ? "" : mode);
+    $("stlabel").textContent = mode.toUpperCase();
+  }
+  function paint() {
+    dirty = false;
+    setStatus();
+    if (model) { $("model").hidden = false; $("model").textContent = model; }
+    const open = {};
+    document.querySelectorAll("#log details[open]").forEach((d) => { if (d.dataset.id) open[d.dataset.id] = 1; });
+    if (!gotSnap) {
+      $("log").hidden = true;
+      $("empty").hidden = true;
+      return;
+    }
+    $("unavail").hidden = true;
+    const html = project();
+    const silent = !html && !working;
+    $("empty").hidden = !silent;
+    $("log").hidden = silent;
+    if (!silent) {
+      $("log").innerHTML = html;
+      document.querySelectorAll("#log details[data-id]").forEach((d) => { if (open[d.dataset.id]) d.open = true; });
+      $("log").scrollTop = $("log").scrollHeight;
+    }
+    if (todos.length) {
+      $("plan").hidden = false;
+      $("plan").innerHTML = todos.map((ph) => {
+        const tasks = (ph.tasks || []).map((t) => '<div class="task ' + esc(t.status || "") + '">' + esc(t.content || "") + "</div>").join("");
+        return (ph.name ? '<div class="phase">' + esc(ph.name) + "</div>" : "") + tasks;
+      }).join("");
+    } else $("plan").hidden = true;
+  }
+  function poke() { if (!dirty) { dirty = true; requestAnimationFrame(paint); } }
+  function adoptModel(m) {
+    const next = fmtModel(m && m.model);
+    if (next) model = next;
+  }
+  function onSnapshot(ev) {
+    const s = ev.messages ? ev : (ev.snapshot || ev);
+    messages = s.messages || [];
+    todos = s.todos || [];
+    pendingAsks = s.pending_ui || s.pendingUi || [];
+    notices = [];
+    streamText = ""; streamThink = ""; activeTools = {};
+    gotSnap = true;
+    messages.forEach(adoptModel);
+    if (!frozen) working = !!s.streaming;
+    $("unavail").hidden = true;
+    poke();
+  }
+  function toast(level, message) {
+    const el = document.createElement("div");
+    el.className = "chip lv-" + (level === "error" ? "error" : "info");
+    el.textContent = message;
+    $("toasts").appendChild(el);
+    while ($("toasts").childNodes.length > 4) $("toasts").removeChild($("toasts").firstChild);
+    setTimeout(() => el.remove(), 7000);
+  }
+  function handle(ev) {
+    if (!ev || typeof ev !== "object") return;
+    const kind = ev.kind;
+    if (kind === "snapshot") return onSnapshot(ev);
+    if (kind === "text_delta") { streamText += ev.delta || ""; working = !frozen; return poke(); }
+    if (kind === "thinking_delta") { streamThink += ev.delta || ""; working = !frozen; return poke(); }
+    if (kind === "message_start") return;
+    if (kind === "message_end") {
+      streamText = ""; streamThink = "";
+      if (ev.message) { messages.push(ev.message); adoptModel(ev.message); }
+      return poke();
+    }
+    if (kind === "tool_start") {
+      if (ev.tool_name === "todo") return;
+      activeTools[ev.tool_call_id] = { name: ev.tool_name, args: ev.args, intent: ev.intent };
+      working = !frozen;
+      return poke();
+    }
+    if (kind === "tool_update") {
+      if (activeTools[ev.tool_call_id]) activeTools[ev.tool_call_id].args = ev.partial;
+      return poke();
+    }
+    if (kind === "tool_end") {
+      const id = ev.tool_call_id;
+      const prev = activeTools[id];
+      delete activeTools[id];
+      if (ev.tool_name === "todo") return;
+      const pack = resultOf(ev.result);
+      messages.push({
+        role: "toolResult", toolCallId: id, toolName: ev.tool_name, isError: !!ev.is_error,
+        content: pack.content != null ? pack.content : pack.text, details: pack.details,
+        arguments: prev && prev.args, intent: prev && prev.intent, _result: ev.result
+      });
+      return poke();
+    }
+    if (kind === "turn_started") { working = !frozen; return poke(); }
+    if (kind === "agent_end") { flushStream(); if (!frozen) working = false; return poke(); }
+    if (kind === "todo_changed") { todos = ev.phases || []; return poke(); }
+    if (kind === "ui_request") {
+      const req = ev.id ? ev : (ev.ui_request || ev);
+      pendingAsks = pendingAsks.filter((a) => a.id !== req.id).concat([req]);
+      return poke();
+    }
+    if (kind === "ui_request_cancelled") {
+      pendingAsks = pendingAsks.filter((a) => a.id !== ev.target_id);
+      return poke();
+    }
+    if (kind === "notice") {
+      notices.push({ level: ev.level || "info", message: ev.message || "" });
+      if (notices.length > 20) notices = notices.slice(-20);
+      toast(ev.level || "info", ev.message || "");
+      return poke();
+    }
+    if (kind === "session_info") {
+      if (ev.title) { $("title").textContent = ev.title; document.title = ev.title; }
+      return;
+    }
+    if (kind === "process_exited") {
+      frozen = true; working = false;
+      flushStream();
+      $("ended").hidden = false;
+      $("ended").textContent = "This session has ended" + (ev.code != null ? " (" + ev.code + ")" : "") + ".";
+      try { ws && ws.close(); } catch {}
+      $("reconnect").hidden = true;
+      return poke();
+    }
+  }
+
+  function streamUrl() {
+    if (!location.host) return null;
+    const proto = location.protocol === "https:" ? "wss:" : "ws:";
+    return proto + "//" + location.host + "/sessions/" + encodeURIComponent(SESSION) + "/stream?share=" + encodeURIComponent(TOKEN);
+  }
+  function failOpen() {
+    if (!gotSnap) $("unavail").hidden = false;
+    paint();
+  }
+  function connect() {
+    if (frozen) return;
+    const url = streamUrl();
+    if (!url) { failOpen(); return; }
+    try { ws = new WebSocket(url); }
+    catch { failOpen(); schedule(); return; }
+    ws.onopen = () => { backoff = 1000; $("reconnect").hidden = true; };
+    ws.onmessage = (e) => {
+      if (typeof e.data !== "string") return;
+      try { handle(JSON.parse(e.data)); } catch {}
+    };
+    ws.onerror = () => {};
+    ws.onclose = () => {
+      if (frozen) return;
+      if (!gotSnap) failOpen();
+      else $("reconnect").hidden = false;
+      schedule();
+    };
+  }
+  function schedule() {
+    if (frozen) return;
+    const d = backoff;
+    backoff = Math.min(backoff * 2, 30000);
+    setTimeout(connect, d);
+  }
+  connect();
+})();
+</script>
+</body>
+</html>
