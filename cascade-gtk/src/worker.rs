@@ -123,6 +123,12 @@ pub enum Cmd {
     },
     ShareSession,
     UnshareSession,
+    /// Paste a view-share URL; worker resolves then [`Cmd::OpenShared`].
+    OpenShareLink(String),
+    OpenShared {
+        session_id: String,
+        token: String,
+    },
     Logout,
     SaveCloudUrl(String),
     RefreshSessions,
@@ -146,7 +152,10 @@ pub enum Cmd {
     PaneToggle(String),
     /// Resolve the Nth session of `kind` from the merged sorted list and open it
     /// (CASCADE_AUTOTEST hook; resolved through the normal OpenSession path).
-    AutotestOpen { kind: BackendKind, index: usize },
+    AutotestOpen {
+        kind: BackendKind,
+        index: usize,
+    },
     Answer {
         request_id: String,
         response: UiAnswer,
@@ -173,6 +182,7 @@ pub enum UiMsg {
         id: String,
         kind: BackendKind,
         snapshot: Option<SessionSnapshot>,
+        read_only: bool,
     },
     Event(SessionEvent),
     Toast(String),
@@ -229,9 +239,7 @@ pub async fn worker(
     let registry = match SessionRegistry::open(&Settings::registry_path()) {
         Ok(r) => r,
         Err(e) => {
-            let _ = ui_tx
-                .send(UiMsg::Error(format!("registry: {e:#}")))
-                .await;
+            let _ = ui_tx.send(UiMsg::Error(format!("registry: {e:#}"))).await;
             return;
         }
     };
@@ -335,9 +343,7 @@ pub async fn worker(
                                     .await;
                             }
                             Err(e) => {
-                                let _ = ui_tx
-                                    .send(UiMsg::Error(format!("share: {e:#}")))
-                                    .await;
+                                let _ = ui_tx.send(UiMsg::Error(format!("share: {e:#}"))).await;
                             }
                         }
                     }
@@ -368,9 +374,7 @@ pub async fn worker(
                                     .await;
                             }
                             Err(e) => {
-                                let _ = ui_tx
-                                    .send(UiMsg::Error(format!("unshare: {e:#}")))
-                                    .await;
+                                let _ = ui_tx.send(UiMsg::Error(format!("unshare: {e:#}"))).await;
                             }
                         }
                     }
@@ -382,6 +386,46 @@ pub async fn worker(
                             .await;
                     }
                 }
+            }
+            Cmd::OpenShareLink(url) => {
+                let Some(client) = cloud.as_ref() else {
+                    let _ = ui_tx
+                        .send(UiMsg::Error("not connected to cloud".into()))
+                        .await;
+                    continue;
+                };
+                match client.resolve_share(&url).await {
+                    Ok(share) => {
+                        let _ = cmd_tx
+                            .send(Cmd::OpenShared {
+                                session_id: share.session_id,
+                                token: share.token,
+                            })
+                            .await;
+                    }
+                    Err(e) => {
+                        let _ = ui_tx.send(UiMsg::Error(e.to_string())).await;
+                    }
+                }
+            }
+            Cmd::OpenShared { session_id, token } => {
+                let Some(client) = cloud.as_ref() else {
+                    let _ = ui_tx
+                        .send(UiMsg::Error("not connected to cloud".into()))
+                        .await;
+                    continue;
+                };
+                attach_cloud(
+                    client,
+                    &session_id,
+                    Some(&token),
+                    &mut current,
+                    &mut pump,
+                    &ui_tx,
+                    &settings,
+                    &inbox,
+                )
+                .await;
             }
             Cmd::Logout => {
                 if let Some(h) = pump.take() {
@@ -425,7 +469,15 @@ pub async fn worker(
                         match manager.spawn(opts).await {
                             Ok(id) => {
                                 if let Some(sess) = manager.get(&id).await {
-                                    attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings).await;
+                                    attach_local(
+                                        sess,
+                                        &mut current,
+                                        &mut pump,
+                                        &ui_tx,
+                                        &inbox,
+                                        &settings,
+                                    )
+                                    .await;
                                     push_sessions(
                                         &manager,
                                         cloud.as_ref(),
@@ -459,12 +511,14 @@ pub async fn worker(
                                         session_id: id.clone(),
                                         cmd: cmd_tx,
                                     });
-                                    pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
+                                    pump =
+                                        Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                                     let _ = ui_tx
                                         .send(UiMsg::Attached {
                                             id: id.clone(),
                                             kind: BackendKind::Cloud,
                                             snapshot: None,
+                                            read_only: false,
                                         })
                                         .await;
                                     send_pane_url(&settings, &id, &ui_tx).await;
@@ -477,9 +531,8 @@ pub async fn worker(
                                     .await;
                                 }
                                 Err(e) => {
-                                    let _ = ui_tx
-                                        .send(UiMsg::Error(format!("attach: {e:#}")))
-                                        .await;
+                                    let _ =
+                                        ui_tx.send(UiMsg::Error(format!("attach: {e:#}"))).await;
                                 }
                             },
                             Err(e) => {
@@ -540,7 +593,8 @@ pub async fn worker(
             } => match kind {
                 BackendKind::Local => {
                     if let Some(sess) = manager.get(&id).await {
-                        attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings).await;
+                        attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings)
+                            .await;
                     } else {
                         let _ = ui_tx
                             .send(UiMsg::Error(format!("local session {id} not running")))
@@ -569,6 +623,7 @@ pub async fn worker(
                                     id: id.clone(),
                                     kind: BackendKind::Cloud,
                                     snapshot: None,
+                                    read_only: false,
                                 })
                                 .await;
                             send_pane_url(&settings, &id, &ui_tx).await;
@@ -605,6 +660,7 @@ pub async fn worker(
                                     id: id.clone(),
                                     kind: BackendKind::Terminal,
                                     snapshot: None,
+                                    read_only: false,
                                 })
                                 .await;
                             send_pane_url(&settings, &id, &ui_tx).await;
@@ -623,9 +679,7 @@ pub async fn worker(
                         let _ = ui_tx.send(UiMsg::Error(format!("prompt: {e:#}"))).await;
                     }
                 } else {
-                    let _ = ui_tx
-                        .send(UiMsg::Error("no session attached".into()))
-                        .await;
+                    let _ = ui_tx.send(UiMsg::Error("no session attached".into())).await;
                 }
             }
             Cmd::Abort => {
@@ -641,9 +695,7 @@ pub async fn worker(
                         let _ = ui_tx.send(UiMsg::Error(format!("queue: {e:#}"))).await;
                     }
                 } else {
-                    let _ = ui_tx
-                        .send(UiMsg::Error("no session attached".into()))
-                        .await;
+                    let _ = ui_tx.send(UiMsg::Error("no session attached".into())).await;
                 }
             }
             Cmd::InboxOpen => {
@@ -677,9 +729,7 @@ pub async fn worker(
                             let _ = ui_tx.send(UiMsg::SessionState(Box::new(st))).await;
                         }
                         Err(e) => {
-                            let _ = ui_tx
-                                .send(UiMsg::Error(format!("get_state: {e:#}")))
-                                .await;
+                            let _ = ui_tx.send(UiMsg::Error(format!("get_state: {e:#}"))).await;
                         }
                     }
                 }
@@ -739,6 +789,7 @@ async fn attach_local(
             id: id.clone(),
             kind: BackendKind::Local,
             snapshot: Some(snapshot),
+            read_only: false,
         })
         .await;
     send_pane_url(settings, &id, ui_tx).await;
@@ -845,4 +896,45 @@ async fn push_sessions(
     }
     list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
     let _ = ui_tx.send(UiMsg::SessionList(list)).await;
+}
+
+async fn attach_cloud(
+    client: &CloudClient,
+    session_id: &str,
+    share_token: Option<&str>,
+    current: &mut Option<SessionBackend>,
+    pump: &mut Option<AbortHandle>,
+    ui_tx: &async_channel::Sender<UiMsg>,
+    settings: &Settings,
+    inbox: &Inbox,
+) {
+    let result = if let Some(tok) = share_token {
+        client.attach_shared(session_id, tok).await
+    } else {
+        client.attach(session_id).await
+    };
+    match result {
+        Ok((ev_rx, cmd_tx)) => {
+            if let Some(h) = pump.take() {
+                h.abort();
+            }
+            *current = Some(SessionBackend::Cloud {
+                session_id: session_id.to_string(),
+                cmd: cmd_tx,
+            });
+            *pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
+            let _ = ui_tx
+                .send(UiMsg::Attached {
+                    id: session_id.to_string(),
+                    kind: BackendKind::Cloud,
+                    snapshot: None,
+                    read_only: share_token.is_some(),
+                })
+                .await;
+            send_pane_url(settings, session_id, ui_tx).await;
+        }
+        Err(e) => {
+            let _ = ui_tx.send(UiMsg::Error(format!("attach: {e:#}"))).await;
+        }
+    }
 }

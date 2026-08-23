@@ -206,9 +206,67 @@ impl CloudClient {
         Ok(())
     }
 
+    /// Resolve a pasted view-share URL (`https://host/s/<token>` or a bare token)
+    /// via `GET <base>/s/<token>` → `{session_id, read_only}`.
+    pub async fn resolve_share(&self, url: &str) -> Result<ResolvedShare> {
+        let token = parse_share_token(url)
+            .ok_or_else(|| anyhow!("that doesn't look like a view link"))?;
+        let req_url = join_url(&self.base_url, &format!("/s/{token}"));
+        let resp = self
+            .http
+            .get(&req_url)
+            .header(reqwest::header::ACCEPT, "application/json")
+            .send()
+            .await
+            .context("GET /s/:token")?;
+        let status = resp.status();
+        let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+        if !status.is_success() {
+            anyhow::bail!("{}", json_error_message(&body));
+        }
+        let session_id = body
+            .get("session_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+            .ok_or_else(|| anyhow!("share lookup missing session_id: {body}"))?
+            .to_string();
+        let read_only = body
+            .get("read_only")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(true);
+        Ok(ResolvedShare {
+            session_id,
+            read_only,
+            token,
+        })
+    }
+
     pub async fn attach(
         &self,
         session_id: &str,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<SessionEvent>,
+        mpsc::UnboundedSender<CloudCommand>,
+    )> {
+        self.attach_with_bearer(session_id, &self.token).await
+    }
+
+    /// Same stream as [`Self::attach`], but the share token is the Bearer.
+    pub async fn attach_shared(
+        &self,
+        session_id: &str,
+        share_token: &str,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<SessionEvent>,
+        mpsc::UnboundedSender<CloudCommand>,
+    )> {
+        self.attach_with_bearer(session_id, share_token).await
+    }
+
+    async fn attach_with_bearer(
+        &self,
+        session_id: &str,
+        bearer_token: &str,
     ) -> Result<(
         mpsc::UnboundedReceiver<SessionEvent>,
         mpsc::UnboundedSender<CloudCommand>,
@@ -218,7 +276,7 @@ impl CloudClient {
             .as_str()
             .into_client_request()
             .context("websocket request")?;
-        let bearer = format!("Bearer {}", self.token);
+        let bearer = format!("Bearer {bearer_token}");
         req.headers_mut().insert(
             AUTHORIZATION,
             bearer.parse().context("Authorization header")?,
@@ -361,4 +419,55 @@ fn http_to_ws(base: &str, session_id: &str) -> String {
         format!("wss://{base}")
     };
     format!("{ws}/sessions/{session_id}/stream")
+}
+
+/// Parsed `GET /s/<token>` response plus the token taken from the pasted URL.
+#[derive(Clone, Debug)]
+pub struct ResolvedShare {
+    pub session_id: String,
+    pub read_only: bool,
+    pub token: String,
+}
+
+/// Token from a view-share URL tail (`…/s/<token>`), or a bare token string.
+fn parse_share_token(url: &str) -> Option<String> {
+    let s = url.trim();
+    if s.is_empty() {
+        return None;
+    }
+    let s = s.split(['?', '#']).next().unwrap_or(s).trim_end_matches('/');
+    let parts: Vec<&str> = s.split('/').filter(|p| !p.is_empty()).collect();
+    if let Some(i) = parts.iter().position(|p| *p == "s") {
+        if let Some(&tok) = parts.get(i + 1) {
+            if !tok.is_empty() {
+                return Some(tok.to_string());
+            }
+        }
+    }
+    if !s.contains("://") && !s.contains('/') {
+        return Some(s.to_string());
+    }
+    None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parse_share_token_from_url_tail() {
+        assert_eq!(
+            parse_share_token("https://wickrunner.com:7701/s/tok").as_deref(),
+            Some("tok")
+        );
+        assert_eq!(
+            parse_share_token("  https://host/s/abc-def_ghi/?x=1#y  ").as_deref(),
+            Some("abc-def_ghi")
+        );
+        assert_eq!(parse_share_token("host/s/plain").as_deref(), Some("plain"));
+        assert_eq!(parse_share_token("baretoken").as_deref(), Some("baretoken"));
+        assert_eq!(parse_share_token("https://host/sessions/xyz"), None);
+        assert_eq!(parse_share_token(""), None);
+        assert_eq!(parse_share_token("   "), None);
+    }
 }

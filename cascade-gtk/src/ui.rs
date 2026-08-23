@@ -254,6 +254,11 @@ pub struct Ui {
     plan_box: GtkBox,
     question_host: GtkBox,
     composer: TextView,
+    attach_btn: Button,
+    composer_hint: Label,
+    share_link_entry: Entry,
+    share_link_reveal: Revealer,
+    read_only: bool,
     send_btn: Button,
     stop_btn: Button,
     queue_btn: Button,
@@ -401,6 +406,9 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     rail_title.add_css_class("rail-section");
     rail_title.set_xalign(0.0);
     rail_title.set_halign(gtk4::Align::Start);
+    let open_link_btn = Button::with_label("🔗");
+    open_link_btn.add_css_class("flat-btn");
+    open_link_btn.set_tooltip_text(Some("Open a view link"));
     let new_btn = Button::with_label("+");
     new_btn.add_css_class("flat-btn");
     new_btn.set_tooltip_text(Some("New session (Ctrl+N)"));
@@ -408,10 +416,20 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     rail_theme_btn.add_css_class("flat-btn");
     rail_theme_btn.set_tooltip_text(Some("Toggle theme"));
     let rail_btns = GtkBox::new(Orientation::Horizontal, 0);
+    rail_btns.append(&open_link_btn);
     rail_btns.append(&new_btn);
     rail_btns.append(&rail_theme_btn);
     rail_head.set_start_widget(Some(&rail_title));
     rail_head.set_end_widget(Some(&rail_btns));
+
+    let share_link_entry = Entry::new();
+    share_link_entry.add_css_class("rail-search");
+    share_link_entry.set_placeholder_text(Some("paste a view link"));
+    let share_link_reveal = Revealer::new();
+    share_link_reveal.set_transition_type(RevealerTransitionType::SlideDown);
+    share_link_reveal.set_transition_duration(180);
+    share_link_reveal.set_reveal_child(false);
+    share_link_reveal.set_child(Some(&share_link_entry));
 
     let rail_search = Entry::new();
     rail_search.add_css_class("rail-search");
@@ -438,6 +456,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     rail_scroll.set_policy(gtk4::PolicyType::Never, gtk4::PolicyType::Automatic);
 
     rail_wrap.append(&rail_head);
+    rail_wrap.append(&share_link_reveal);
     rail_wrap.append(&rail_search);
     rail_wrap.append(&segmented);
     rail_wrap.append(&rail_scroll);
@@ -747,6 +766,11 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         plan_box,
         question_host,
         composer,
+        attach_btn: attach_btn.clone(),
+        composer_hint: hint.clone(),
+        share_link_entry: share_link_entry.clone(),
+        share_link_reveal: share_link_reveal.clone(),
+        read_only: false,
         send_btn: send_btn.clone(),
         stop_btn: stop_btn.clone(),
         queue_btn: queue_btn.clone(),
@@ -782,6 +806,34 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     theme_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| toggle_theme(&ui)));
     rail_theme_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| toggle_theme(&ui)));
     new_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| show_new_session_dialog(&ui)));
+    open_link_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+        let u = ui.borrow();
+        let next = !u.share_link_reveal.reveals_child();
+        u.share_link_reveal.set_reveal_child(next);
+        if next {
+            u.share_link_entry.grab_focus();
+        }
+    }));
+    share_link_entry.connect_activate(glib::clone!(#[strong] ui, move |entry| {
+        let url = entry.text().to_string();
+        if url.trim().is_empty() {
+            return;
+        }
+        entry.set_text("");
+        ui.borrow().share_link_reveal.set_reveal_child(false);
+        let _ = ui.borrow().cmd.try_send(Cmd::OpenShareLink(url));
+    }));
+    {
+        let keys = EventControllerKey::new();
+        keys.connect_key_pressed(glib::clone!(#[strong] ui, move |_, key, _, _| {
+            if key == gdk::Key::Escape {
+                ui.borrow().share_link_reveal.set_reveal_child(false);
+                return glib::Propagation::Stop;
+            }
+            glib::Propagation::Proceed
+        }));
+        share_link_entry.add_controller(keys);
+    }
     pane_toggle.connect_clicked(glib::clone!(#[strong] ui, move |_| toggle_pane(&ui)));
 
     dark_check.connect_toggled(glib::clone!(#[strong] ui, move |c| {
@@ -1105,6 +1157,11 @@ fn apply_registering(u: &Ui, on: bool) {
 
 fn sync_share_buttons(ui: &Rc<RefCell<Ui>>) {
     let u = ui.borrow();
+    if u.read_only {
+        u.share_btn.set_visible(false);
+        u.unshare_btn.set_visible(false);
+        return;
+    }
     let cloud = u.attached_kind == Some(BackendKind::Cloud);
     let shared = match &u.selected_id {
         Some(id) => u.sharing.contains(id),
@@ -1464,6 +1521,9 @@ fn composer_text(ui: &Rc<RefCell<Ui>>) -> String {
 }
 
 fn send_prompt(ui: &Rc<RefCell<Ui>>) {
+    if ui.borrow().read_only {
+        return;
+    }
     let text = composer_text(ui);
     if text.trim().is_empty() {
         return;
@@ -1490,6 +1550,9 @@ fn send_prompt(ui: &Rc<RefCell<Ui>>) {
 }
 
 fn queue_prompt(ui: &Rc<RefCell<Ui>>) {
+    if ui.borrow().read_only {
+        return;
+    }
     let text = composer_text(ui);
     if text.trim().is_empty() {
         return;
@@ -1858,6 +1921,7 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             u.selected_id = None;
             u.attached_kind = None;
             u.sharing.clear();
+            u.read_only = false;
             apply_registering(&u, false);
             u.status_label.set_text("connecting…");
             u.window.set_title(Some("cascade"));
@@ -1865,13 +1929,14 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             clear_box(&u.live_box);
             u.buffers.clear();
             drop(u);
+            sync_composer_mode(ui);
             sync_share_buttons(ui);
         }
         UiMsg::SessionList(list) => {
             ui.borrow_mut().metas = list;
             render_rail(ui);
         }
-        UiMsg::Attached { id, kind, snapshot } => {
+        UiMsg::Attached { id, kind, snapshot, read_only } => {
             {
                 let mut u = ui.borrow_mut();
                 // per-session scroll memory: stash the old, restore the new
@@ -1885,6 +1950,8 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                 u.selected_id = Some(id.clone());
                 u.stream = StreamState::default();
                 u.attached_kind = Some(kind);
+                u.read_only = read_only;
+                u.share_link_reveal.set_reveal_child(false);
                 let title = u
                     .metas
                     .iter()
@@ -1915,6 +1982,7 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                 });
             }
             render_rail(ui);
+            sync_composer_mode(ui);
             if let Some(snap) = snapshot {
                 apply_snapshot(ui, snap);
             }
@@ -2030,13 +2098,31 @@ fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
 }
 
 fn set_streaming(ui: &Rc<RefCell<Ui>>, on: bool) {
-    let mut u = ui.borrow_mut();
-    u.stream.streaming = on;
-    u.send_btn.set_visible(!on);
-    u.stop_btn.set_visible(on);
-    u.queue_btn.set_visible(on);
-    drop(u);
+    ui.borrow_mut().stream.streaming = on;
+    sync_composer_mode(ui);
     render_rail(ui); // ACTIVE/IDLE status refresh
+}
+
+fn sync_composer_mode(ui: &Rc<RefCell<Ui>>) {
+    let u = ui.borrow();
+    let ro = u.read_only;
+    u.composer.set_editable(!ro);
+    u.attach_btn.set_sensitive(!ro);
+    u.send_btn.set_sensitive(!ro);
+    u.queue_btn.set_sensitive(!ro);
+    u.stop_btn.set_sensitive(!ro);
+    if ro {
+        u.send_btn.set_visible(false);
+        u.stop_btn.set_visible(false);
+        u.queue_btn.set_visible(false);
+        u.composer_hint.set_text("view-only share");
+    } else {
+        let streaming = u.stream.streaming;
+        u.send_btn.set_visible(!streaming);
+        u.stop_btn.set_visible(streaming);
+        u.queue_btn.set_visible(streaming);
+        u.composer_hint.set_text("esc stops a running turn");
+    }
 }
 
 /// Settle the live tail into the durable rows (AgentEnd).
