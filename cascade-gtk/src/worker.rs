@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use cascade_core::{
-    CloudClient, CloudCommand, OmpSession, SessionEvent, SessionManager, SessionMeta,
+    CloudClient, CloudCommand, ListedSession, OmpSession, SessionEvent, SessionManager,
     SessionRegistry, SessionSnapshot, SpawnOptions, UiAnswer,
 };
 use cascade_relay::{CollabAttach, GuestCommand};
@@ -177,7 +177,7 @@ pub enum UiMsg {
     SharingStopped {
         session_id: String,
     },
-    SessionList(Vec<SessionMeta>),
+    SessionList(Vec<ListedSession>),
     Attached {
         id: String,
         kind: BackendKind,
@@ -546,7 +546,7 @@ pub async fn worker(
             }
             Cmd::AutotestOpen { kind, index } => {
                 // Same merge + sort as push_sessions.
-                let mut list = manager.list().await;
+                let mut list = listed_from_manager(&manager).await;
                 if let Some(c) = cloud.as_ref() {
                     if let Ok(mut remote) = c.list_sessions().await {
                         list.append(&mut remote);
@@ -867,19 +867,16 @@ fn pump_inbox(ev: &SessionEvent, inbox: &Inbox, ui_tx: &async_channel::Sender<Ui
     }
 }
 
-async fn annotate_local_process_status(manager: &SessionManager, list: &mut [SessionMeta]) {
-    for m in list.iter_mut() {
-        match manager.get(&m.id).await {
-            Some(sess) => {
-                m.live = Some(true);
-                m.working = Some(sess.is_streaming().await);
-            }
-            None => {
-                m.live = Some(false);
-                m.working = Some(false);
-            }
-        }
+async fn listed_from_manager(manager: &SessionManager) -> Vec<ListedSession> {
+    let mut list = Vec::new();
+    for m in manager.list().await {
+        let (live, working) = match manager.get(&m.id).await {
+            Some(sess) => (Some(true), Some(sess.is_streaming().await)),
+            None => (Some(false), Some(false)),
+        };
+        list.push(ListedSession::from_meta(m, live, working));
     }
+    list
 }
 
 async fn push_sessions(
@@ -888,8 +885,7 @@ async fn push_sessions(
     terminal_links: &mut HashMap<String, String>,
     ui_tx: &async_channel::Sender<UiMsg>,
 ) {
-    let mut list = manager.list().await;
-    annotate_local_process_status(manager, &mut list).await;
+    let mut list = listed_from_manager(manager).await;
     terminal_links.clear();
     if let Some(c) = cloud {
         match c.list_sessions().await {

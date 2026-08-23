@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Context, Result};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
 use tokio::sync::mpsc;
@@ -38,6 +39,56 @@ pub struct MachineInfo {
     pub name: String,
     pub online: bool,
     pub is_cloud: bool,
+}
+
+/// Cloud `GET /sessions` row. Matches cascaded `ListedSession` JSON, including
+/// optional process flags that are not stored on registry `SessionMeta`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ListedSession {
+    pub id: String,
+    pub omp_session_id: Option<String>,
+    pub name: Option<String>,
+    pub cwd: String,
+    pub session_file: Option<String>,
+    pub machine: String,
+    pub created_at: DateTime<Utc>,
+    pub last_active: DateTime<Utc>,
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub join_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub view_handle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pid: Option<i64>,
+    /// Process exists. `None` = unknown.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
+    /// Actively streaming. `None` = unknown; `None` with `live == true` → IDLE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working: Option<bool>,
+}
+
+impl ListedSession {
+    /// Lift a registry row into a list view, attaching process flags.
+    pub fn from_meta(m: SessionMeta, live: Option<bool>, working: Option<bool>) -> Self {
+        Self {
+            id: m.id,
+            omp_session_id: m.omp_session_id,
+            name: m.name,
+            cwd: m.cwd,
+            session_file: m.session_file,
+            machine: m.machine,
+            created_at: m.created_at,
+            last_active: m.last_active,
+            kind: m.kind,
+            join_handle: m.join_handle,
+            view_handle: m.view_handle,
+            pid: m.pid,
+            live,
+            working,
+        }
+    }
 }
 
 impl CloudClient {
@@ -133,7 +184,7 @@ impl CloudClient {
         Ok(out)
     }
 
-    pub async fn list_sessions(&self) -> Result<Vec<SessionMeta>> {
+    pub async fn list_sessions(&self) -> Result<Vec<ListedSession>> {
         let url = join_url(&self.base_url, "/sessions");
         let resp = self.http.get(&url).send().await.context("GET /sessions")?;
         let status = resp.status();
@@ -150,8 +201,7 @@ impl CloudClient {
         };
         let mut out = Vec::new();
         for v in arr {
-            // ListedSession JSON includes optional live/working on SessionMeta.
-            out.push(serde_json::from_value::<SessionMeta>(v)?);
+            out.push(serde_json::from_value::<ListedSession>(v)?);
         }
         Ok(out)
     }

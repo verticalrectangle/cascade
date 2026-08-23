@@ -11,7 +11,7 @@ use std::rc::Rc;
 use std::time::Duration;
 
 use cascade_core::{
-    SessionEvent, SessionMeta, SessionSnapshot, TodoPhase, TodoStatus, UiAnswer, UiMethod,
+    ListedSession, SessionEvent, SessionSnapshot, TodoPhase, TodoStatus, UiAnswer, UiMethod,
     UiRequest,
 };
 use gtk4::gdk;
@@ -221,7 +221,7 @@ enum RailStatus {
 }
 
 impl RailStatus {
-    fn from_meta(m: &SessionMeta) -> Self {
+    fn from_meta(m: &ListedSession) -> Self {
         match m.live {
             Some(true) if m.working == Some(true) => Self::Live,
             Some(true) => Self::Idle,
@@ -246,7 +246,7 @@ impl RailStatus {
     }
 }
 
-fn ended_earlier(m: &SessionMeta) -> bool {
+fn ended_earlier(m: &ListedSession) -> bool {
     RailStatus::from_meta(m) == RailStatus::Ended
         && (chrono::Utc::now() - m.last_active).num_hours() >= 24
 }
@@ -306,7 +306,7 @@ pub struct Ui {
     stream: StreamState,
     selected_id: Option<String>,
     attached_kind: Option<BackendKind>,
-    metas: Vec<SessionMeta>,
+    metas: Vec<ListedSession>,
     settings: Settings,
     earlier_collapsed: bool,
     session_models: HashMap<String, String>,
@@ -319,7 +319,7 @@ pub struct Ui {
 }
 
 /// Display name for a session: live omp title → cwd basename → short id.
-fn session_display_name(m: &SessionMeta) -> String {
+fn session_display_name(m: &ListedSession) -> String {
     if let Some(name) = m.name.as_deref().filter(|n| !n.trim().is_empty()) {
         return name.to_string();
     }
@@ -1641,7 +1641,7 @@ fn paste_image(ui: &Rc<RefCell<Ui>>) -> bool {
 
 // ── rail rendering ───────────────────────────────────────────────────
 
-fn meta_kind(m: &SessionMeta) -> BackendKind {
+fn meta_kind(m: &ListedSession) -> BackendKind {
     if m.kind == "terminal" {
         BackendKind::Terminal
     } else if m.machine == "cloud" || m.machine.is_empty() {
@@ -1668,7 +1668,7 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
     let u = ui.borrow();
     clear_box(&u.rail_list);
     let query = u.rail_search.text().to_lowercase();
-    let mut filtered: Vec<&SessionMeta> = u
+    let mut filtered: Vec<&ListedSession> = u
         .metas
         .iter()
         .filter(|m| {
@@ -1697,7 +1697,7 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
             .then_with(|| b.last_active.cmp(&a.last_active))
     });
 
-    let (current, earlier): (Vec<&SessionMeta>, Vec<&SessionMeta>) =
+    let (current, earlier): (Vec<&ListedSession>, Vec<&ListedSession>) =
         filtered.into_iter().partition(|m| !ended_earlier(m));
 
     for meta in current {
@@ -1735,7 +1735,7 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
     }
 }
 
-fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &SessionMeta) -> GtkBox {
+fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &ListedSession) -> GtkBox {
     let u = ui.borrow();
     let row = GtkBox::new(Orientation::Vertical, 2);
     row.add_css_class("rail-item");
