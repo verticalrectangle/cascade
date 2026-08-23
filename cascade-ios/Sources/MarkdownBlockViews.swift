@@ -199,7 +199,7 @@ struct MDBlockView: View {
             .multilineTextAlignment(textAlign(align))
             .selectableText(selectable)
             .fixedSize(horizontal: true, vertical: true)
-            .frame(minWidth: 48, alignment: frameAlign(align))
+            .frame(minWidth: 48, alignment: Alignment(horizontal: frameAlign(align), vertical: .center))
             .gridColumnAlignment(frameAlign(align))
     }
 }
