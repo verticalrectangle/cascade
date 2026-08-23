@@ -225,8 +225,17 @@ struct LoginGate: View {
                   let p = ProcessInfo.processInfo.environment["CASCADE_PASSWORD"] else { return }
             host = h; email = e
             busy = true; error = nil
-            error = await app.signIn(base: h, email: e, password: p)
-            busy = false
+            // Unstructured task: awaiting signIn inside .task ties the
+            // post-login refreshSessions to LoginGate's view lifetime — the
+            // auto-attach swaps the view out mid-refresh and SwiftUI cancels
+            // it (-999), leaving the roster empty forever.
+            Task {
+                let err = await app.signIn(base: h, email: e, password: p)
+                await MainActor.run {
+                    error = err
+                    busy = false
+                }
+            }
         }
     }
 
