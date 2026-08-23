@@ -3,6 +3,7 @@ pub mod session;
 pub mod registry;
 pub mod remote;
 pub mod replay;
+pub mod watch;
 pub mod state {
     pub use crate::session::*;
 }
