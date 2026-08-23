@@ -1,3 +1,16 @@
+
+extension View {
+    /// Conditional text selection — `.enabled` and `.disabled` are different
+    /// concrete types, so a ternary in .textSelection() cannot type-check.
+    @ViewBuilder
+    func selectableText(_ on: Bool) -> some View {
+        if on {
+            self.textSelection(.enabled)
+        } else {
+            self
+        }
+    }
+}
 //  MarkdownBlockViews.swift
 //  Structured markdown block renderer (headings, lists, quotes, rules, tables,
 //  images) used by every markdownBlocks consumer.
@@ -92,7 +105,7 @@ struct MDBlockView: View {
     private func proseText(_ p: String) -> some View {
         Text(inlineMarkdown(p, t: t, baseColor: proseColor, defaultLanguage: language))
             .font(proseFont)
-            .textSelection(selectable ? .enabled : .disabled)
+            .selectableText(selectable)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -108,7 +121,7 @@ struct MDBlockView: View {
         let color: Color = (level <= 2) ? t.accent : (proseColor ?? t.txt)
         return Text(inlineMarkdown(text, t: t, baseColor: color, defaultLanguage: language))
             .font(.system(size: size, weight: .bold))
-            .textSelection(selectable ? .enabled : .disabled)
+            .selectableText(selectable)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -118,7 +131,7 @@ struct MDBlockView: View {
             listMarker(kind, level: level)
             Text(inlineMarkdown(text, t: t, baseColor: proseColor, defaultLanguage: language))
                 .font(proseFont)
-                .textSelection(selectable ? .enabled : .disabled)
+                .selectableText(selectable)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -154,7 +167,7 @@ struct MDBlockView: View {
                 .frame(width: 3)
             Text(inlineMarkdown(text, t: t, baseColor: t.txtMuted, defaultLanguage: language))
                 .font(proseFont)
-                .textSelection(selectable ? .enabled : .disabled)
+                .selectableText(selectable)
                 .fixedSize(horizontal: false, vertical: true)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
@@ -184,7 +197,7 @@ struct MDBlockView: View {
             .font(proseFont)
             .fontWeight(header ? .bold : .regular)
             .multilineTextAlignment(textAlign(align))
-            .textSelection(selectable ? .enabled : .disabled)
+            .selectableText(selectable)
             .fixedSize(horizontal: true, vertical: true)
             .frame(minWidth: 48, alignment: frameAlign(align))
             .gridColumnAlignment(frameAlign(align))
