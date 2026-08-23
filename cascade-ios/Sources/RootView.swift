@@ -118,9 +118,8 @@ final class AppModel: ObservableObject {
                     enhanced: !isTerminal,
                     kind: isTerminal ? "terminal" : (m.kind ?? "managed"),
                     joinHandle: m.join_handle,
-                    viewHandle: m.view_handle,
-                    live: m.live,
-                    empty: m.empty)
+                    viewHandle: m.view_handle)
+                .withLive(m.live, empty: m.empty)
             }
             // Preserve user color tags across refreshes.
             let oldTags = loadTags()

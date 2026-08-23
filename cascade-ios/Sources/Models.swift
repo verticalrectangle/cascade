@@ -229,4 +229,8 @@ struct JoinedSession: Identifiable, Codable, Equatable {
     var kind: String? = nil            // "managed" | "terminal"
     var joinHandle: String? = nil
     var viewHandle: String? = nil
+
+    func withLive(_ live: Bool?, empty: Bool?) -> JoinedSession {
+        var s = self; s.live = live; s.empty = empty; return s
+    }
 }
