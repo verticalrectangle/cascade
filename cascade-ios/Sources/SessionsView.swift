@@ -43,15 +43,15 @@ struct SessionsView: View {
 
     // MARK: - derived lists
 
+    // Live = watcher-confirmed OR the server says a process exists right now.
+    private func isLive(_ s: JoinedSession) -> Bool {
+        app.live[s.id] == true || s.live == true
+    }
     private var liveSessions: [JoinedSession] {
-        app.sessions.filter {
-            app.live[$0.id] == true && matchesQuery($0)
-        }.sorted { $0.savedAt > $1.savedAt }
+        app.sessions.filter { isLive($0) && matchesQuery($0) }
     }
     private var offlineSessions: [JoinedSession] {
-        app.sessions.filter {
-            app.live[$0.id] != true && matchesQuery($0)
-        }.sorted { $0.savedAt > $1.savedAt }
+        app.sessions.filter { !isLive($0) && matchesQuery($0) }
     }
     private func matchesQuery(_ s: JoinedSession) -> Bool {
         query.isEmpty || s.title.localizedCaseInsensitiveContains(query) || s.relay.localizedCaseInsensitiveContains(query)
@@ -137,7 +137,7 @@ struct JoinedCard: View {
     let t: Theme
     let state: SessionState
 
-    private var isLive: Bool { state.live }
+    private var isLive: Bool { state.live || session.live == true }
     private var isPlanReview: Bool { state.mode == "plan" && !state.working && state.live }
     private var isReplying: Bool { state.live && state.working }
     private var statusText: String {
