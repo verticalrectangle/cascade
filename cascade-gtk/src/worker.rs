@@ -660,7 +660,16 @@ pub async fn worker(
                             .await;
                         continue;
                     };
+                    // A TUI can outlive its collab room (host socket died,
+                    // process lived). A dead room IS an ended session —
+                    // surface it as such instead of a scary attach error.
                     match CollabAttach::connect(&link).await {
+                        Err(e) if format!("{e:#}").contains("no such room") => {
+                            let _ = ui_tx
+                                .send(UiMsg::Toast("session ended (room closed)".into()))
+                                .await;
+                            continue;
+                        }
                         Ok((ev_rx, cmd_tx)) => {
                             if let Some(h) = pump.take() {
                                 h.abort();
