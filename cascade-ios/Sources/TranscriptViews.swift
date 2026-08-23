@@ -41,7 +41,8 @@ struct TurnRow: View {
         case .ask where turn.askKind == "plan":
             PlanReviewCard(turn: turn, t: t,
                 onSubmit: onAnswer.map { cb in { idx in cb(turn, idx) } },
-                onSubmitText: onAnswerText.map { cb in { text in cb(turn, text) } })
+                onSubmitText: onAnswerText.map { cb in { text in cb(turn, text) } },
+                onImage: onImage)
         case .ask:
             AskCard(turn: turn, t: t,
                 onSubmit: onAnswer.map { cb in { idx in cb(turn, idx) } },
@@ -68,21 +69,7 @@ struct TurnRow: View {
                 }
             }
             if !turn.text.isEmpty {
-                VStack(alignment: .leading, spacing: 9) {
-                    ForEach(Array(markdownBlocks(turn.text).enumerated()), id: \.offset) { _, seg in
-                        switch seg {
-                        case .prose(let p):
-                            if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                                Text(inlineMarkdown(p, t: t)).font(.bodyF(14))
-                                    .frame(maxWidth: .infinity, alignment: .leading)
-                            }
-                        case .advisory(let severity, let guidance, let body):
-                            AdvisoryCard(severity: severity, guidance: guidance, advisoryBody: body, t: t)
-                        case .code(let lang, let body):
-                            CodeBlock(lang: lang, code: body, t: t)
-                        }
-                    }
-                }
+                MarkdownBlocksView(text: turn.text, t: t, proseFont: .bodyF(14), selectable: false, onImage: onImage)
                 .padding(.horizontal, 13).padding(.vertical, 10)
                 .glass(t, 16)
                 .contextMenu { messageMenu }
@@ -94,55 +81,35 @@ struct TurnRow: View {
 
     private var agentLine: some View {
         // Serif prose with fenced code rendered as scrollable monospace boxes.
-        let segs = markdownBlocksWithLanguage(turn.text)
-        return VStack(alignment: .leading, spacing: 9) {
-            ForEach(0..<segs.count, id: \.self) { i in
-                switch segs[i].block {
-                case .prose(let p):
-                    if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(inlineMarkdown(p, t: t, defaultLanguage: segs[i].language))
-                            .font(.serif(16))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                case .advisory(let severity, let guidance, let body):
-                    AdvisoryCard(severity: severity, guidance: guidance, advisoryBody: body, t: t, defaultLanguage: segs[i].language)
-                case .code(let lang, let body):
-                    CodeBlock(lang: lang, code: body, t: t)
-                }
+        MarkdownBlocksView(text: turn.text, t: t, proseFont: .serif(16), onImage: onImage)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .contextMenu {
+                Button { UIPasteboard.general.string = turn.text } label: { Label("Copy", systemImage: "doc.on.doc") }
             }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .contextMenu {
-            Button { UIPasteboard.general.string = turn.text } label: { Label("Copy", systemImage: "doc.on.doc") }
-        }
     }
 
     private var advisorNote: some View {
-        let segs = markdownBlocksWithLanguage(turn.text)
-        return VStack(alignment: .leading, spacing: 9) {
-            ForEach(0..<segs.count, id: \.self) { i in
-                switch segs[i].block {
-                case .prose(let p):
-                    if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(inlineMarkdown(p, t: t, defaultLanguage: segs[i].language))
-                            .font(.bodyF(13.5))
-                            .textSelection(.enabled)
-                    }
-                case .advisory(let severity, let guidance, let body):
-                    AdvisoryCard(severity: severity, guidance: guidance, advisoryBody: body, t: t, defaultLanguage: segs[i].language)
-                case .code(let lang, let body):
-                    CodeBlock(lang: lang, code: body, t: t)
-                }
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        MarkdownBlocksView(text: turn.text, t: t, proseFont: .bodyF(13.5), onImage: onImage)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
 // MARK: - Markdown blocks (prose + fenced code)
 
-enum MDBlock { case prose(String); case code(lang: String, body: String); case advisory(severity: String?, guidance: String?, body: String) }
+enum MDListKind { case bullet; case numbered(UInt64); case task(checked: Bool) }
+enum MDAlign { case left, center, right }
+
+enum MDBlock {
+    case prose(String)
+    case heading(level: Int, text: String)
+    case listItem(level: Int, kind: MDListKind, text: String)
+    case quote(String)
+    case rule
+    case table(header: [String], aligns: [MDAlign], rows: [[String]])
+    case code(lang: String, body: String)
+    case advisory(severity: String?, guidance: String?, body: String)
+    case image(alt: String, target: String)
+}
 
 func decodeEntities(_ s: String) -> String {
     s.replacingOccurrences(of: "&lt;", with: "<")
@@ -201,7 +168,7 @@ func advisoryCloserRange(in line: String) -> Range<String.Index>? {
 func markdownBlocks(_ s: String) -> [MDBlock] {
     var out: [MDBlock] = []
     var prose: [String] = []
-    let lines = s.components(separatedBy: "\n")
+    let lines = s.components(separatedBy: "\n").map { $0.hasSuffix("\r") ? String($0.dropLast()) : $0 }
     var i = 0
     func flush() { if !prose.isEmpty { out.append(.prose(prose.joined(separator: "\n"))); prose = [] } }
     while i < lines.count {
@@ -245,24 +212,227 @@ func markdownBlocks(_ s: String) -> [MDBlock] {
                 }
                 out.append(.advisory(severity: severity, guidance: guidance, body: decodeEntities(body.joined(separator: "\n"))))
             }
+        } else if let structured = takeStructuredBlock(lines, at: &i) {
+            flush()
+            out.append(structured)
         } else { prose.append(lines[i]); i += 1 }
     }
     flush()
     return out
 }
 
+func takeStructuredBlock(_ lines: [String], at i: inout Int) -> MDBlock? {
+    guard i < lines.count else { return nil }
+    let line = lines[i]
+
+    if mdIsQuoteLine(line) {
+        var parts: [String] = []
+        while i < lines.count, mdIsQuoteLine(lines[i]) {
+            parts.append(mdQuoteContent(lines[i]))
+            i += 1
+        }
+        return .quote(parts.joined(separator: "\n"))
+    }
+
+    if line.contains("|"), i + 1 < lines.count, let rawAligns = mdTableAligns(lines[i + 1]) {
+        let header = mdSplitTableRow(line)
+        guard !header.isEmpty else { return nil }
+        var aligns = rawAligns
+        if aligns.count < header.count {
+            aligns.append(contentsOf: Array(repeating: MDAlign.left, count: header.count - aligns.count))
+        } else if aligns.count > header.count {
+            aligns = Array(aligns.prefix(header.count))
+        }
+        i += 2
+        var rows: [[String]] = []
+        while i < lines.count {
+            let bodyLine = lines[i]
+            let trimmed = bodyLine.trimmingCharacters(in: .whitespaces)
+            if trimmed.hasPrefix("```") { break }
+            if advisoryStart(in: trimmed) != nil { break }
+            if !bodyLine.contains("|") { break }
+            var cells = mdSplitTableRow(bodyLine)
+            if cells.count < header.count {
+                cells.append(contentsOf: Array(repeating: "", count: header.count - cells.count))
+            } else if cells.count > header.count {
+                cells = Array(cells.prefix(header.count))
+            }
+            rows.append(cells)
+            i += 1
+        }
+        return .table(header: header, aligns: aligns, rows: rows)
+    }
+
+    if let (level, text) = mdHeading(line) {
+        i += 1
+        return .heading(level: level, text: text)
+    }
+    if mdIsRuleLine(line) {
+        i += 1
+        return .rule
+    }
+    if let (alt, target) = mdSoleImage(line) {
+        i += 1
+        return .image(alt: alt, target: target)
+    }
+    if let (level, kind, text) = mdListItem(line) {
+        i += 1
+        return .listItem(level: level, kind: kind, text: text)
+    }
+    return nil
+}
+
+func mdLeadingSpaceCount(_ line: String) -> Int {
+    var n = 0
+    for ch in line {
+        if ch == " " { n += 1 }
+        else if ch == "\t" { n += 2 }
+        else { break }
+    }
+    return n
+}
+
+func mdDropLeadingWS(_ line: String) -> Substring {
+    var idx = line.startIndex
+    while idx < line.endIndex, line[idx] == " " || line[idx] == "\t" {
+        idx = line.index(after: idx)
+    }
+    return line[idx...]
+}
+
+func mdIsQuoteLine(_ line: String) -> Bool {
+    line.trimmingCharacters(in: .whitespaces).hasPrefix(">")
+}
+
+func mdQuoteContent(_ line: String) -> String {
+    let t = line.trimmingCharacters(in: .whitespaces)
+    if t.hasPrefix("> ") || t.hasPrefix(">\t") { return String(t.dropFirst(2)) }
+    if t.hasPrefix(">") { return String(t.dropFirst(1)) }
+    return t
+}
+
+func mdHeading(_ line: String) -> (Int, String)? {
+    let t = line.trimmingCharacters(in: .whitespaces)
+    var n = 0
+    var idx = t.startIndex
+    while idx < t.endIndex, t[idx] == "#", n < 5 {
+        n += 1
+        idx = t.index(after: idx)
+    }
+    guard (1...4).contains(n), idx < t.endIndex else { return nil }
+    let ch = t[idx]
+    guard ch == " " || ch == "\t" else { return nil }
+    idx = t.index(after: idx)
+    return (n, String(t[idx...]))
+}
+
+func mdIsRuleLine(_ line: String) -> Bool {
+    let t = line.trimmingCharacters(in: .whitespaces)
+    let core = t.filter { $0 != " " && $0 != "\t" }
+    guard core.count >= 3, let c = core.first, c == "-" || c == "*" || c == "_" else { return false }
+    return core.allSatisfy { $0 == c }
+}
+
+func mdSoleImage(_ line: String) -> (String, String)? {
+    let t = line.trimmingCharacters(in: .whitespaces)
+    guard t.hasPrefix("![") else { return nil }
+    guard let rb = t.firstIndex(of: "]") else { return nil }
+    let altStart = t.index(t.startIndex, offsetBy: 2)
+    let alt = String(t[altStart..<rb])
+    var idx = t.index(after: rb)
+    guard idx < t.endIndex, t[idx] == "(" else { return nil }
+    idx = t.index(after: idx)
+    guard let rp = t[idx...].firstIndex(of: ")") else { return nil }
+    let target = String(t[idx..<rp])
+    let after = t[t.index(after: rp)...]
+    guard after.trimmingCharacters(in: .whitespaces).isEmpty, !target.isEmpty else { return nil }
+    return (alt, target)
+}
+
+func mdListItem(_ line: String) -> (Int, MDListKind, String)? {
+    let level = mdLeadingSpaceCount(line) / 2
+    let rest = String(mdDropLeadingWS(line))
+
+    if rest.hasPrefix("- [ ] ") {
+        let body = String(rest.dropFirst(6))
+        guard !body.isEmpty else { return nil }
+        return (level, .task(checked: false), body)
+    }
+    if rest.hasPrefix("- [x] ") || rest.hasPrefix("- [X] ") {
+        let body = String(rest.dropFirst(6))
+        guard !body.isEmpty else { return nil }
+        return (level, .task(checked: true), body)
+    }
+    for prefix in ["- ", "* ", "• "] {
+        if rest.hasPrefix(prefix) {
+            let body = String(rest.dropFirst(prefix.count))
+            guard !body.isEmpty else { return nil }
+            return (level, .bullet, body)
+        }
+    }
+    if let (n, body) = mdNumberedMarker(rest) {
+        guard !body.isEmpty else { return nil }
+        return (level, .numbered(n), body)
+    }
+    return nil
+}
+
+func mdNumberedMarker(_ rest: String) -> (UInt64, String)? {
+    var digits = ""
+    var idx = rest.startIndex
+    while idx < rest.endIndex, digits.count < 3, rest[idx].isNumber {
+        digits.append(rest[idx])
+        idx = rest.index(after: idx)
+    }
+    guard !digits.isEmpty, idx < rest.endIndex else { return nil }
+    let sep = rest[idx]
+    guard sep == "." || sep == ")" else { return nil }
+    idx = rest.index(after: idx)
+    guard idx < rest.endIndex, rest[idx] == " " || rest[idx] == "\t" else { return nil }
+    idx = rest.index(after: idx)
+    guard let n = UInt64(digits) else { return nil }
+    return (n, String(rest[idx...]))
+}
+
+func mdSplitTableRow(_ line: String) -> [String] {
+    var s = line.trimmingCharacters(in: .whitespaces)
+    if s.hasPrefix("|") { s.removeFirst() }
+    if s.hasSuffix("|") { s.removeLast() }
+    return s.split(separator: "|", omittingEmptySubsequences: false).map {
+        $0.trimmingCharacters(in: .whitespaces)
+    }
+}
+
+func mdTableAligns(_ line: String) -> [MDAlign]? {
+    let cells = mdSplitTableRow(line)
+    guard !cells.isEmpty else { return nil }
+    var out: [MDAlign] = []
+    for cell in cells {
+        let c = cell.filter { $0 != " " && $0 != "\t" }
+        guard !c.isEmpty else { return nil }
+        let left = c.first == ":"
+        let right = c.last == ":"
+        var core = Substring(c)
+        if left { core = core.dropFirst() }
+        if right { core = core.dropLast() }
+        guard !core.isEmpty, core.allSatisfy({ $0 == "-" }) else { return nil }
+        if left && right { out.append(.center) }
+        else if right { out.append(.right) }
+        else { out.append(.left) }
+    }
+    return out
+}
+
 /// Same markdown split, but with an inferred inline-code language for each prose/advisory block.
 /// The language is the `lang` of the nearest preceding fenced code block; `generic` for none.
-func markdownBlocksWithLanguage(_ s: String) -> [(block: MDBlock, language: String)] {
-    var lastLang = ""
+func markdownBlocksWithLanguage(_ s: String, seed: String = "") -> [(block: MDBlock, language: String)] {
+    var lastLang = seed
     return markdownBlocks(s).map { block in
-        switch block {
-        case .code(let lang, _):
+        if case .code(let lang, _) = block {
             lastLang = lang
             return (block, lang)
-        case .prose, .advisory:
-            return (block, lastLang)
         }
+        return (block, lastLang)
     }
 }
 
@@ -308,6 +478,8 @@ struct AdvisoryCard: View {
     let advisoryBody: String
     let t: Theme
     var defaultLanguage: String = ""
+    var proseFont: Font = .serif(16)
+    var onImage: ((String) -> Void)? = nil
 
     private var color: Color {
         switch severity {
@@ -337,8 +509,13 @@ struct AdvisoryCard: View {
                     Text(guidance).font(.bodyF(12)).foregroundStyle(t.txtMuted).textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
                 }
                 if !advisoryBody.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                    Text(inlineMarkdown(advisoryBody, t: t, defaultLanguage: defaultLanguage)).font(.serif(16))
-                        .fixedSize(horizontal: false, vertical: true).textSelection(.enabled)
+                    MarkdownBlocksView(
+                        text: advisoryBody,
+                        t: t,
+                        proseFont: proseFont,
+                        seedLanguage: defaultLanguage,
+                        onImage: onImage
+                    )
                 }
             }
             .padding(.leading, 11).padding(.trailing, 12).padding(.vertical, 8)
@@ -733,6 +910,7 @@ struct PlanReviewCard: View {
     let turn: UITurn; let t: Theme
     var onSubmit: ((Int) -> Void)? = nil
     var onSubmitText: ((String) -> Void)? = nil
+    var onImage: ((String) -> Void)? = nil
 
     @State private var sent = false
     @State private var picked: Int? = nil
@@ -770,22 +948,7 @@ struct PlanReviewCard: View {
     }
 
     private var planBody: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            ForEach(Array(markdownBlocks(turn.helpText).enumerated()), id: \.offset) { _, block in
-                switch block {
-                case .prose(let p):
-                    if !p.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                        Text(inlineMarkdown(p, t: t))
-                            .font(.bodyF(13)).foregroundStyle(t.txtBody).textSelection(.enabled)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                case .advisory(let severity, let guidance, let body):
-                    AdvisoryCard(severity: severity, guidance: guidance, advisoryBody: body, t: t)
-                case .code(let lang, let body):
-                    CodeBlock(lang: lang, code: body, t: t)
-                }
-            }
-        }
+        MarkdownBlocksView(text: turn.helpText, t: t, proseFont: .bodyF(13), proseColor: t.txtBody, onImage: onImage)
         .padding(10)
         .glass(t, 14, flat: true)
     }
@@ -995,6 +1158,8 @@ struct SrcImage<Content: View, Placeholder: View>: View {
             content(Image(uiImage: ui))
         } else if let url = URL(string: src), url.scheme?.hasPrefix("http") == true {
             AsyncImage(url: url) { content($0) } placeholder: { placeholder() }
+        } else if let ui = Self.loadLocal(src) {
+            content(Image(uiImage: ui))
         } else {
             placeholder()
         }
@@ -1004,7 +1169,17 @@ struct SrcImage<Content: View, Placeholder: View>: View {
         if src.hasPrefix("data:"), let ui = decode(src) {
             return CGSize(width: ui.size.width * ui.scale, height: ui.size.height * ui.scale)
         }
+        if let ui = loadLocal(src) {
+            return CGSize(width: ui.size.width * ui.scale, height: ui.size.height * ui.scale)
+        }
         return nil
+    }
+
+    static func loadLocal(_ path: String) -> UIImage? {
+        if path.hasPrefix("file://"), let url = URL(string: path) {
+            return UIImage(contentsOfFile: url.path)
+        }
+        return UIImage(contentsOfFile: path)
     }
 
     static func decode(_ dataURI: String) -> UIImage? {

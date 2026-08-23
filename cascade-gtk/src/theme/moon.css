@@ -189,6 +189,17 @@ window {
               0 0 8px rgba(235, 111, 146, 0.1);
 }
 
+.advisory-chip {
+  font-size: 8pt;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  color: #6E6A86;
+}
+.advisory-guidance {
+  font-weight: 700;
+  color: #E0DEF4;
+}
+
 /* Tool-kind rail tints (widget adds tool-<kind>). */
 .tool-tool-use    { border-left-color: #3E8FB0; }
 .tool-tool-result { border-left-color: #9CCFD8; }
@@ -203,6 +214,13 @@ window {
 .tool-card textview text,
 .advisory-card textview,
 .advisory-card textview text {
+  background-color: transparent;
+}
+
+.md-quote-card textview,
+.md-quote-card textview text,
+.md-table-card textview,
+.md-table-card textview text {
   background-color: transparent;
 }
 
@@ -225,6 +243,13 @@ window {
 .md-h3 {
   font-size: 13pt;
   font-weight: 600;
+  color: #E0DEF4;
+  margin: 8px 0 4px 0;
+}
+
+.md-h4 {
+  font-size: 13.5pt;
+  font-weight: 700;
   color: #E0DEF4;
   margin: 8px 0 4px 0;
 }
@@ -257,6 +282,40 @@ window {
 .md-link {
   color: #C4A7E7;
   text-decoration-line: underline;
+}
+
+.md-strike { text-decoration-line: line-through; }
+.md-highlight { background-color: rgba(246, 193, 119, 0.22); }
+.md-list-marker { color: #6E6A86; font-weight: 700; }
+
+.md-quote-card {
+  border-left: 3px solid #F6C177;
+  padding: 6px 10px;
+  margin: 6px 0;
+}
+
+.md-table-card {
+  background-color: #2A273F;
+  border: 1px solid #1B1930;
+  border-top-color: #393552;
+  border-radius: 0;
+  padding: 8px 10px;
+  margin: 6px 0;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+  font-size: 12pt;
+}
+
+.md-table-card textview,
+.md-table-card textview text {
+  background-color: transparent;
+  font-family: "JetBrains Mono", "Cascadia Code", monospace;
+}
+
+separator.md-rule {
+  min-height: 1px;
+  background-color: #393552;
+  margin-top: 8px;
+  margin-bottom: 8px;
 }
 
 /* ── Diff & terminal ──────────────────────────────────────── */

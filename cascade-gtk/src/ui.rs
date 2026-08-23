@@ -6,7 +6,7 @@
 
 use std::cell::{Cell, RefCell};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -56,6 +56,7 @@ struct Palette {
     comment: &'static str,
     function: &'static str,
     inline_code_bg: &'static str,
+    highlight_bg: &'static str,
     diff_add_bg: &'static str,
     diff_remove_bg: &'static str,
 }
@@ -75,6 +76,7 @@ fn palette(theme: &str) -> Palette {
             comment: "#6E6A86",
             function: "#EBBCBA",
             inline_code_bg: "rgba(156,207,216,0.12)",
+            highlight_bg: "rgba(246,193,119,0.22)",
             diff_add_bg: "rgba(49,116,143,0.35)",
             diff_remove_bg: "rgba(235,111,146,0.18)",
         }
@@ -92,6 +94,7 @@ fn palette(theme: &str) -> Palette {
             comment: "#9893A5",
             function: "#D7827E",
             inline_code_bg: "rgba(86,148,159,0.16)",
+            highlight_bg: "rgba(234,157,52,0.22)",
             diff_add_bg: "rgba(86,148,159,0.22)",
             diff_remove_bg: "rgba(180,99,122,0.16)",
         }
@@ -110,7 +113,9 @@ struct TagSpec {
     italic: bool,
     font: Option<&'static str>,
     size_pt: f64,
+    scale: f64,
     underline: bool,
+    strikethrough: bool,
 }
 
 fn tag_specs(theme: &str) -> Vec<(&'static str, TagSpec)> {
@@ -123,9 +128,10 @@ fn tag_specs(theme: &str) -> Vec<(&'static str, TagSpec)> {
     push("user", TagSpec {
         fg: Some(p.text), font: Some(SANS), size_pt: 11.25, ..Default::default()
     }); // 15px
-    push("md-h1", TagSpec { fg: Some(p.gold), weight: 700, size_pt: 17.0, ..Default::default() });
-    push("md-h2", TagSpec { fg: Some(p.gold), weight: 700, size_pt: 15.0, ..Default::default() });
-    push("md-h3", TagSpec { fg: Some(p.text), weight: 600, size_pt: 13.0, ..Default::default() });
+    push("md-h1", TagSpec { fg: Some(p.gold), weight: 700, scale: 1.5, ..Default::default() });
+    push("md-h2", TagSpec { fg: Some(p.gold), weight: 700, scale: 1.3, ..Default::default() });
+    push("md-h3", TagSpec { fg: Some(p.text), weight: 700, scale: 1.15, ..Default::default() });
+    push("md-h4", TagSpec { fg: Some(p.text), weight: 700, scale: 1.0, ..Default::default() });
     push("md-bold", TagSpec { fg: Some(p.gold), weight: 700, ..Default::default() });
     push("md-italic", TagSpec { italic: true, ..Default::default() });
     push("md-bold-italic", TagSpec { weight: 700, italic: true, ..Default::default() });
@@ -138,7 +144,10 @@ fn tag_specs(theme: &str) -> Vec<(&'static str, TagSpec)> {
     });
     push("md-quote", TagSpec { fg: Some(p.subtle), italic: true, ..Default::default() });
     push("md-list", TagSpec { fg: Some(p.text), ..Default::default() });
+    push("md-list-marker", TagSpec { fg: Some(p.muted), weight: 700, ..Default::default() });
     push("md-link", TagSpec { fg: Some(p.iris), underline: true, ..Default::default() });
+    push("md-strike", TagSpec { strikethrough: true, ..Default::default() });
+    push("md-highlight", TagSpec { bg: Some(p.highlight_bg), ..Default::default() });
     push("code", TagSpec {
         fg: Some(p.foam), bg: Some(p.code_bg), font: Some(MONO), size_pt: 12.5,
         ..Default::default()
@@ -180,12 +189,20 @@ fn apply_tag(table: &TextTagTable, name: &str, spec: &TagSpec) {
     tag.set_font(spec.font);
     if spec.size_pt > 0.0 {
         tag.set_size_points(spec.size_pt);
+    } else {
+        tag.set_property("size-set", false);
+    }
+    if spec.scale > 0.0 {
+        tag.set_scale(spec.scale);
+    } else {
+        tag.set_property("scale-set", false);
     }
     tag.set_underline(if spec.underline {
         pango::Underline::Single
     } else {
         pango::Underline::None
     });
+    tag.set_strikethrough(spec.strikethrough);
 }
 
 /// Create (or restyle) all transcript tags on a buffer for `theme`.
@@ -1298,12 +1315,315 @@ fn new_view(ui: &Rc<RefCell<Ui>>) -> TextView {
     tv.set_left_margin(0);
     tv.set_right_margin(0);
     ui.borrow_mut().buffers.push(buf);
+    attach_link_handlers(&tv);
     tv
 }
 
 fn insert_tagged(buf: &TextBuffer, text: &str, tag: &str) {
     let mut end = buf.end_iter();
     buf.insert_with_tags_by_name(&mut end, text, &[tag]);
+}
+
+fn insert_named(buf: &TextBuffer, text: &str, tags: &[&str]) {
+    let mut end = buf.end_iter();
+    buf.insert_with_tags_by_name(&mut end, text, tags);
+}
+
+fn insert_run(buf: &TextBuffer, run: &markdown::Run, extra: &[&str]) {
+    let start_off = buf.end_iter().offset();
+    let mut names: Vec<&str> = Vec::with_capacity(extra.len() + 2);
+    names.push(run.tag);
+    names.extend_from_slice(extra);
+    if run.link.is_some() && run.tag != "md-link" {
+        names.push("md-link");
+    }
+    insert_named(buf, &run.text, &names);
+    if let Some(url) = run.link.as_deref().filter(|u| !u.is_empty()) {
+        apply_link_url(buf, start_off, url);
+    }
+}
+
+fn insert_runs(buf: &TextBuffer, runs: &[markdown::Run], extra: &[&str]) {
+    for run in runs {
+        insert_run(buf, run, extra);
+    }
+}
+
+const LINK_URL_PREFIX: &str = "md-url:";
+
+fn apply_link_url(buf: &TextBuffer, start_off: i32, url: &str) {
+    let name = format!("{LINK_URL_PREFIX}{url}");
+    let table = buf.tag_table();
+    if table.lookup(&name).is_none() {
+        table.add(&TextTag::new(Some(&name)));
+    }
+    let start = buf.iter_at_offset(start_off);
+    let end = buf.end_iter();
+    buf.apply_tag_by_name(&name, &start, &end);
+}
+
+fn link_url_at(view: &TextView, x: f64, y: f64) -> Option<String> {
+    let (bx, by) = view.window_to_buffer_coords(gtk4::TextWindowType::Widget, x as i32, y as i32);
+    let iter = view.iter_at_location(bx, by)?;
+    for tag in iter.tags() {
+        if let Some(name) = tag.name() {
+            if let Some(url) = name.strip_prefix(LINK_URL_PREFIX) {
+                if !url.is_empty() {
+                    return Some(url.to_string());
+                }
+            }
+        }
+    }
+    None
+}
+
+fn attach_link_handlers(view: &TextView) {
+    let click = GestureClick::new();
+    click.set_button(1);
+    let view_c = view.clone();
+    click.connect_pressed(move |gest, _, x, y| {
+        if let Some(url) = link_url_at(&view_c, x, y) {
+            gest.set_state(gtk4::EventSequenceState::Claimed);
+            let parent = view_c.root().and_then(|r| r.downcast::<gtk4::Window>().ok());
+            #[allow(deprecated)]
+            gtk4::show_uri(parent.as_ref(), &url, 0);
+        }
+    });
+    view.add_controller(click);
+
+    let motion = EventControllerMotion::new();
+    let view_m = view.clone();
+    motion.connect_motion(move |_, x, y| {
+        if link_url_at(&view_m, x, y).is_some() {
+            view_m.set_cursor_from_name(Some("pointer"));
+        } else {
+            view_m.set_cursor_from_name(None);
+        }
+    });
+    let view_l = view.clone();
+    motion.connect_leave(move |_| {
+        view_l.set_cursor_from_name(None);
+    });
+    view.add_controller(motion);
+}
+
+fn heading_tag(level: u8) -> &'static str {
+    match level {
+        1 => "md-h1",
+        2 => "md-h2",
+        3 => "md-h3",
+        _ => "md-h4",
+    }
+}
+
+fn list_marker(level: u8, kind: markdown::ListKind) -> String {
+    match kind {
+        markdown::ListKind::Bullet => {
+            let glyph = match level {
+                0 => "•",
+                1 => "◦",
+                _ => "▪",
+            };
+            format!("{glyph} ")
+        }
+        markdown::ListKind::Numbered(n) => format!("{n}. "),
+        markdown::ListKind::Task { checked } => {
+            if checked {
+                "☑ ".into()
+            } else {
+                "☐ ".into()
+            }
+        }
+    }
+}
+
+fn ensure_hang_tag(buf: &TextBuffer, level: u8) -> String {
+    let name = format!("md-hang-{level}");
+    let table = buf.tag_table();
+    if table.lookup(&name).is_none() {
+        let tag = TextTag::new(Some(&name));
+        tag.set_left_margin(i32::from(level) * 24 + 28);
+        tag.set_indent(-28);
+        table.add(&tag);
+    }
+    name
+}
+
+fn flatten_runs(runs: &[markdown::Run]) -> String {
+    runs.iter()
+        .map(|r| r.text.as_str())
+        .collect::<String>()
+        .replace(['\n', '\r'], " ")
+}
+
+fn char_display_width(c: char) -> usize {
+    let u = c as u32;
+    if c.is_control() {
+        0
+    } else if (0x1100..=0x115F).contains(&u)
+        || (0x2329..=0x232A).contains(&u)
+        || (0x2E80..=0xA4CF).contains(&u)
+        || (0xAC00..=0xD7A3).contains(&u)
+        || (0xF900..=0xFAFF).contains(&u)
+        || (0xFE10..=0xFE19).contains(&u)
+        || (0xFE30..=0xFE6F).contains(&u)
+        || (0xFF00..=0xFF60).contains(&u)
+        || (0xFFE0..=0xFFE6).contains(&u)
+        || (0x1F300..=0x1F64F).contains(&u)
+        || (0x1F900..=0x1F9FF).contains(&u)
+        || (0x20000..=0x3FFFD).contains(&u)
+    {
+        2
+    } else {
+        1
+    }
+}
+
+fn display_width(s: &str) -> usize {
+    s.chars().map(char_display_width).sum()
+}
+
+fn pad_cell(text: &str, width: usize, align: markdown::Align) -> String {
+    let w = display_width(text);
+    let pad = width.saturating_sub(w);
+    match align {
+        markdown::Align::Left => format!("{text}{}", " ".repeat(pad)),
+        markdown::Align::Right => format!("{}{text}", " ".repeat(pad)),
+        markdown::Align::Center => {
+            let left = pad / 2;
+            format!("{}{text}{}", " ".repeat(left), " ".repeat(pad - left))
+        }
+    }
+}
+
+fn format_table_lines(
+    header: &[Vec<markdown::Run>],
+    aligns: &[markdown::Align],
+    rows: &[Vec<Vec<markdown::Run>>],
+) -> (String, String, Vec<String>) {
+    let cols = header.len();
+    let mut widths = vec![1usize; cols];
+    let head_txt: Vec<String> = header.iter().map(|c| flatten_runs(c)).collect();
+    for (i, t) in head_txt.iter().enumerate() {
+        widths[i] = widths[i].max(display_width(t));
+    }
+    let row_txt: Vec<Vec<String>> = rows
+        .iter()
+        .map(|row| {
+            (0..cols)
+                .map(|i| row.get(i).map(|c| flatten_runs(c)).unwrap_or_default())
+                .collect()
+        })
+        .collect();
+    for row in &row_txt {
+        for (i, t) in row.iter().enumerate() {
+            widths[i] = widths[i].max(display_width(t));
+        }
+    }
+    let align_at = |i: usize| aligns.get(i).copied().unwrap_or(markdown::Align::Left);
+    let fmt_row = |cells: &[String]| -> String {
+        cells
+            .iter()
+            .enumerate()
+            .map(|(i, t)| pad_cell(t, widths[i], align_at(i)))
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    let header_line = fmt_row(&head_txt);
+    let sep = widths.iter().map(|w| "─".repeat(*w)).collect::<Vec<_>>().join("  ");
+    let body = row_txt.iter().map(|r| fmt_row(r)).collect();
+    (header_line, sep, body)
+}
+
+fn append_alt_prose(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, alt: &str) {
+    if alt.is_empty() {
+        return;
+    }
+    let tv = new_view(ui);
+    insert_tagged(&tv.buffer(), alt, "assistant");
+    attach_copy_menu(&tv, "Copy text");
+    parent.append(&tv);
+}
+
+fn markdown_picture(ui: &Rc<RefCell<Ui>>, texture: &gdk::Texture) -> Picture {
+    let pic = Picture::for_paintable(texture);
+    pic.add_css_class("transcript-image");
+    pic.set_can_shrink(true);
+    pic.set_halign(gtk4::Align::Start);
+    let w = texture.width();
+    let h = texture.height();
+    let max_w = 240;
+    if w > max_w && w > 0 {
+        let nh = ((h as i64) * (max_w as i64) / (w as i64)) as i32;
+        pic.set_size_request(max_w, nh.max(1));
+    } else if w > 0 {
+        pic.set_size_request(w, h);
+    } else {
+        pic.set_size_request(max_w, -1);
+    }
+    let ui2 = ui.clone();
+    let tex = texture.clone();
+    let click = GestureClick::new();
+    click.connect_pressed(move |_, _, _, _| {
+        show_lightbox(&ui2, &tex);
+    });
+    pic.add_controller(click);
+    pic
+}
+
+fn local_path_from_target(target: &str) -> PathBuf {
+    if let Some(rest) = target.strip_prefix("file://") {
+        let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+        PathBuf::from(rest)
+    } else {
+        PathBuf::from(target)
+    }
+}
+
+const MAX_MD_IMAGE: usize = 10 * 1024 * 1024;
+
+fn append_markdown_image(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, alt: &str, target: &str) {
+    if target.starts_with("http://") || target.starts_with("https://") {
+        append_remote_image(ui, parent, alt, target);
+        return;
+    }
+    let path = local_path_from_target(target);
+    match gdk::Texture::from_filename(&path) {
+        Ok(tex) => parent.append(&markdown_picture(ui, &tex)),
+        Err(_) => append_alt_prose(ui, parent, alt),
+    }
+}
+
+fn append_remote_image(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, alt: &str, url: &str) {
+    let holder = GtkBox::new(Orientation::Vertical, 0);
+    parent.append(&holder);
+    let ui = ui.clone();
+    let alt = alt.to_string();
+    let file = gio::File::for_uri(url);
+    file.load_contents_async(None::<&gio::Cancellable>, move |res| {
+        let outcome = (|| {
+            let (bytes, _) = res.ok()?;
+            if bytes.len() > MAX_MD_IMAGE {
+                return None;
+            }
+            let (ctype, _) = gio::content_type_guess(None::<&Path>, &bytes);
+            let mime = gio::content_type_get_mime_type(&ctype)
+                .map(|m| m.to_string())
+                .unwrap_or_else(|| ctype.to_string());
+            if !mime.starts_with("image/") {
+                return None;
+            }
+            let ext = mime.rsplit('/').next().unwrap_or("img");
+            let ext = ext.split('+').next().unwrap_or(ext);
+            let path = std::env::temp_dir().join(format!("cascade-md-{}.{ext}", uuid::Uuid::new_v4()));
+            std::fs::write(&path, &bytes).ok()?;
+            gdk::Texture::from_filename(&path).ok()
+        })();
+        glib::idle_add_local_once(move || match outcome {
+            Some(tex) => holder.append(&markdown_picture(&ui, &tex)),
+            None => append_alt_prose(&ui, &holder, &alt),
+        });
+    });
 }
 
 fn copy_text(text: &str) {
@@ -1355,17 +1675,116 @@ fn attach_copy_menu(view: &TextView, label: &str) {
 fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
     for block in markdown::parse_blocks(body) {
         match block {
-            Block::Prose(segs) => {
+            Block::Prose(runs) => {
                 let tv = new_view(ui);
-                let buf = tv.buffer();
-                for (text, tag) in segs {
-                    insert_tagged(&buf, &text, tag);
-                }
+                insert_runs(&tv.buffer(), &runs, &[]);
                 attach_copy_menu(&tv, "Copy text");
                 parent.append(&tv);
             }
+            Block::Heading { level, runs } => {
+                let tv = new_view(ui);
+                insert_runs(&tv.buffer(), &runs, &[heading_tag(level)]);
+                attach_copy_menu(&tv, "Copy text");
+                parent.append(&tv);
+            }
+            Block::ListItem { level, kind, runs } => {
+                let tv = new_view(ui);
+                let buf = tv.buffer();
+                let hang = ensure_hang_tag(&buf, level);
+                let marker = list_marker(level, kind);
+                let checked = matches!(kind, markdown::ListKind::Task { checked: true });
+                if checked {
+                    insert_named(&buf, &marker, &["md-list-marker", "md-bold"]);
+                } else {
+                    insert_named(&buf, &marker, &["md-list-marker"]);
+                }
+                insert_runs(&buf, &runs, &[]);
+                let start = buf.start_iter();
+                let end = buf.end_iter();
+                buf.apply_tag_by_name(&hang, &start, &end);
+                attach_copy_menu(&tv, "Copy text");
+                parent.append(&tv);
+            }
+            Block::Quote { runs } => {
+                let card = GtkBox::new(Orientation::Vertical, 0);
+                card.add_css_class("md-quote-card");
+                let tv = new_view(ui);
+                insert_runs(&tv.buffer(), &runs, &["md-quote"]);
+                attach_copy_menu(&tv, "Copy text");
+                card.append(&tv);
+                parent.append(&card);
+            }
+            Block::Rule => {
+                let rule = Separator::new(Orientation::Horizontal);
+                rule.add_css_class("md-rule");
+                parent.append(&rule);
+            }
+            Block::Table {
+                header,
+                aligns,
+                rows,
+            } => {
+                let card = GtkBox::new(Orientation::Vertical, 0);
+                card.add_css_class("md-table-card");
+                let scroll = ScrolledWindow::new();
+                scroll.set_policy(gtk4::PolicyType::Automatic, gtk4::PolicyType::Never);
+                scroll.set_propagate_natural_height(true);
+                scroll.set_hexpand(true);
+                let tv = new_view(ui);
+                tv.set_wrap_mode(gtk4::WrapMode::None);
+                let buf = tv.buffer();
+                let (head, sep, body_lines) = format_table_lines(&header, &aligns, &rows);
+                insert_named(&buf, &head, &["md-bold"]);
+                insert_named(&buf, "\n", &["assistant"]);
+                insert_named(&buf, &sep, &["assistant"]);
+                for line in body_lines {
+                    insert_named(&buf, "\n", &["assistant"]);
+                    insert_named(&buf, &line, &["assistant"]);
+                }
+                attach_copy_menu(&tv, "Copy text");
+                scroll.set_child(Some(&tv));
+                card.append(&scroll);
+                parent.append(&card);
+            }
             Block::Code { lang, code } => {
                 parent.append(&code_block_widget(ui, &lang, &code));
+            }
+            Block::Advisory {
+                severity,
+                guidance,
+                body,
+            } => {
+                let card = GtkBox::new(Orientation::Vertical, 4);
+                card.add_css_class("advisory-card");
+                let sev = severity.as_deref().unwrap_or("");
+                card.add_css_class(if sev.eq_ignore_ascii_case("error") {
+                    "advisory-error"
+                } else {
+                    "advisory-info"
+                });
+                if !sev.is_empty() {
+                    let chip = Label::new(Some(&sev.to_uppercase()));
+                    chip.add_css_class("advisory-chip");
+                    chip.set_xalign(0.0);
+                    card.append(&chip);
+                }
+                if let Some(g) = guidance.as_deref().filter(|s| !s.is_empty()) {
+                    let gl = Label::new(Some(g));
+                    gl.add_css_class("advisory-guidance");
+                    gl.set_wrap(true);
+                    gl.set_xalign(0.0);
+                    gl.set_selectable(true);
+                    card.append(&gl);
+                }
+                if !body.trim().is_empty() {
+                    let inner = GtkBox::new(Orientation::Vertical, 0);
+                    render_markdown_into(ui, &inner, &body);
+                    card.append(&inner);
+                }
+                parent.append(&card);
+            }
+            Block::Image { alt, target } => {
+                append_markdown_image(ui, parent, &alt, &target);
             }
         }
     }
