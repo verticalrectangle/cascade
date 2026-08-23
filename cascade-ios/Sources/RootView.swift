@@ -11,6 +11,7 @@ import Combine
 @MainActor
 final class AppModel: ObservableObject {
     @Published var sessions: [JoinedSession] = []      // mirror of GET /sessions
+    private var refreshing = false
     @Published var account: CascadeClient.Account?
     @Published var active: CascadeClient?
     @Published var showEditor = false
@@ -100,7 +101,12 @@ final class AppModel: ObservableObject {
 
     /// Pull GET /sessions into the local card list.
     func refreshSessions() async {
-        guard let account else { return }
+        // Overlapping refreshes coalesce-cancel each other's URLSession tasks;
+        // the catch below used to read that as a dead token and signOut(),
+        // looping login → refresh → cancel → signOut forever.
+        guard !refreshing, let account else { return }
+        refreshing = true
+        defer { refreshing = false }
         do {
             let metas = try await CascadeClient.listSessions(account: account)
             let machineNames: [String: String] = Dictionary(
@@ -133,6 +139,8 @@ final class AppModel: ObservableObject {
                 }
             syncWatchers()
         } catch {
+            // Cancellation is a superseded refresh, not an auth failure.
+            if (error as NSError).code == NSURLErrorCancelled { return }
             // A dead/expired token drops you back on the login screen.
             signOut()
         }
