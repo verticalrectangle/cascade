@@ -93,6 +93,17 @@ struct EditorView: View {
         }
     }
 
+    private func copyShareLink(expiresInHours: Int?) {
+        Task {
+            if let url = await app.shareSession(expiresInHours: expiresInHours) {
+                UIPasteboard.general.string = url
+                showToast("Link copied")
+            } else {
+                showToast("Couldn't create a view link")
+            }
+        }
+    }
+
     // MARK: session menu (top-right …)
 
     @ViewBuilder private var sessionMenu: some View {
@@ -139,26 +150,28 @@ struct EditorView: View {
                 Label("Export transcript…", systemImage: "square.and.arrow.up")
             }
             if !vm.readOnly && vm.live.joinLink.isEmpty {
-                Button {
-                    Task {
-                        if let url = await app.shareSession() {
-                            UIPasteboard.general.string = url
-                            showToast("Link copied")
-                        } else {
-                            showToast("Couldn't create a view link")
-                        }
+                Menu {
+                    Button {
+                        copyShareLink(expiresInHours: 24)
+                    } label: {
+                        Label("For 24 hours", systemImage: "clock")
+                    }
+                    Button {
+                        copyShareLink(expiresInHours: nil)
+                    } label: {
+                        Label("Forever (until revoked)", systemImage: "infinity")
                     }
                 } label: {
-                    Label("Share view link…", systemImage: "link")
+                    Label("Share view link", systemImage: "link")
                 }
-                if app.sessionShares[vm.live.sessionId] != nil {
+                if let share = app.sessionShares[vm.live.sessionId] {
                     Button {
                         Task {
                             await app.stopSharing()
                             showToast("Sharing stopped")
                         }
                     } label: {
-                        Label("Stop sharing", systemImage: "link.badge.minus")
+                        Label(share.expiry.stopSharingLabel, systemImage: "link.badge.minus")
                     }
                 }
             }

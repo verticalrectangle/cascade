@@ -193,10 +193,12 @@ final class AppModel: ObservableObject {
     }
 
     /// Mint a view link for the connected session. Returns the share URL, or nil on failure.
-    func shareSession() async -> String? {
+    /// `expiresInHours` nil means forever (until revoked). UI default is 24.
+    func shareSession(expiresInHours: Int?) async -> String? {
         guard let account, let id = connectedId, !id.isEmpty else { return nil }
         do {
-            let info = try await CascadeClient.createShare(account: account, sessionId: id)
+            let info = try await CascadeClient.createShare(account: account, sessionId: id,
+                                                           expiresInHours: expiresInHours)
             sessionShares[id] = info
             return info.url
         } catch {
@@ -214,7 +216,7 @@ final class AppModel: ObservableObject {
         guard let account else { return }
         do {
             if let info = try await CascadeClient.getShare(account: account, sessionId: id) {
-                sessionShares[id] = info
+                sessionShares[id] = info.mergingExpiry(sessionShares[id])
             } else {
                 sessionShares.removeValue(forKey: id)
             }

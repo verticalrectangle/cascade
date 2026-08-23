@@ -237,27 +237,76 @@ final class CascadeClient: ObservableObject {
         return Account(base: base, token: tok, email: email)
     }
 
+    enum ShareExpiry: Equatable {
+        case hours(Int)
+        case forever
+        case unknown
+
+        var stopSharingLabel: String {
+            switch self {
+            case .hours(let h): return "Stop sharing (\(h)h)"
+            case .forever: return "Stop sharing (forever)"
+            case .unknown: return "Stop sharing"
+            }
+        }
+    }
+
     struct ShareInfo: Equatable {
         let token: String
         let url: String
+        var expiry: ShareExpiry = .unknown
+
+        func mergingExpiry(_ previous: ShareInfo?) -> ShareInfo {
+            if expiry != .unknown { return self }
+            guard let previous else { return self }
+            return ShareInfo(token: token, url: url, expiry: previous.expiry)
+        }
     }
 
-    static func createShare(account: Account, sessionId: String) async throws -> ShareInfo {
+    private static func shareExpiry(from obj: [String: Any], fallback: ShareExpiry) -> ShareExpiry {
+        if obj["expires_in_hours"] is NSNull { return .forever }
+        if let hours = obj["expires_in_hours"] as? Int { return .hours(hours) }
+        if let hours = obj["expires_in_hours"] as? Double { return .hours(Int(hours)) }
+        if obj["expires_at"] is NSNull { return .forever }
+        if let raw = obj["expires_at"] as? String {
+            let trimmed = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.isEmpty || trimmed.lowercased() == "never" { return .forever }
+            return fallback == .unknown ? .hours(24) : fallback
+        }
+        return fallback
+    }
+
+    private static func decodeShareInfo(_ obj: [String: Any], base: URL, fallback: ShareExpiry) -> ShareInfo? {
+        guard let token = obj["token"] as? String, let url = obj["url"] as? String else { return nil }
+        return ShareInfo(token: token, url: absolutizeShareURL(url, base: base),
+                         expiry: shareExpiry(from: obj, fallback: fallback))
+    }
+
+    static func createShare(account: Account, sessionId: String, expiresInHours: Int?) async throws -> ShareInfo {
         var req = URLRequest(url: account.base
             .appendingPathComponent("sessions")
             .appendingPathComponent(sessionId)
             .appendingPathComponent("share"))
         req.httpMethod = "POST"
         req.setValue("Bearer \(account.token)", forHTTPHeaderField: "Authorization")
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        let payload: [String: Any]
+        if let hours = expiresInHours {
+            payload = ["expires_in_hours": hours]
+        } else {
+            payload = ["expires_in_hours": NSNull()]
+        }
+        req.httpBody = Wire.body(payload).data(using: .utf8)
         let (data, resp): (Data, URLResponse)
         do { (data, resp) = try await URLSession.shared.data(for: req) }
         catch { throw BridgeError.network(String(describing: error)) }
         guard let http = resp as? HTTPURLResponse else { throw BridgeError.badResponse }
         guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = obj["token"] as? String,
-              let url = obj["url"] as? String else { throw BridgeError.badResponse }
-        return ShareInfo(token: token, url: absolutizeShareURL(url, base: account.base))
+              let info = decodeShareInfo(obj, base: account.base,
+                                         fallback: expiresInHours.map { .hours($0) } ?? .forever)
+        else { throw BridgeError.badResponse }
+        return info
     }
 
     static func deleteShare(account: Account, sessionId: String) async throws {
@@ -287,9 +336,9 @@ final class CascadeClient: ObservableObject {
         if http.statusCode == 404 { return nil }
         guard http.statusCode == 200 else { throw daemonError(data, status: http.statusCode) }
         guard let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let token = obj["token"] as? String,
-              let url = obj["url"] as? String else { throw BridgeError.badResponse }
-        return ShareInfo(token: token, url: absolutizeShareURL(url, base: account.base))
+              let info = decodeShareInfo(obj, base: account.base, fallback: .unknown)
+        else { throw BridgeError.badResponse }
+        return info
     }
 
     static func resolveShare(base: URL, token: String) async throws -> String {
