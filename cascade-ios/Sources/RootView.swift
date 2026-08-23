@@ -511,7 +511,11 @@ struct RootView: View {
         .task {
             // Launch seam / deep-link: auto-attach to CASCADE_SESSION from an env var,
             // or fall back to the most recent daemon session after a cold launch.
-            guard app.active == nil, app.account != nil else { return }
+            // Fire once per launch — a failed attach must not re-trigger on
+            // every navigation pop (that looped: attach → welcome timeout →
+            // leave → view re-appears → .task again).
+            guard !didAutoAttach, app.active == nil, app.account != nil else { return }
+            didAutoAttach = true
             if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
                 _ = app.connect(sessionId: id)
             } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
