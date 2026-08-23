@@ -24,7 +24,7 @@ use gtk4::{
     EventControllerKey, EventControllerMotion, GestureClick, GestureDrag, Label, MenuButton,
     Orientation, Overlay, PasswordEntry, Picture, Popover, ProgressBar, Revealer,
     RevealerTransitionType, ScrolledWindow, Separator, TextBuffer, TextTag, TextTagTable,
-    TextView, ToggleButton, Window,
+    TextView, Window,
 };
 
 use crate::markdown::{self, Block};
@@ -213,10 +213,42 @@ struct StreamState {
     last_user_echo: Option<(String, std::time::Instant)>,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum Grouping {
-    Recent,
-    Project,
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RailStatus {
+    Live,
+    Idle,
+    Ended,
+}
+
+impl RailStatus {
+    fn from_meta(m: &SessionMeta) -> Self {
+        match m.live {
+            Some(true) if m.working == Some(true) => Self::Live,
+            Some(true) => Self::Idle,
+            Some(false) | None => Self::Ended,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Live => "LIVE",
+            Self::Idle => "IDLE",
+            Self::Ended => "ENDED",
+        }
+    }
+
+    fn css_class(self) -> &'static str {
+        match self {
+            Self::Live => "live",
+            Self::Idle => "idle",
+            Self::Ended => "ended",
+        }
+    }
+}
+
+fn ended_earlier(m: &SessionMeta) -> bool {
+    RailStatus::from_meta(m) == RailStatus::Ended
+        && (chrono::Utc::now() - m.last_active).num_hours() >= 24
 }
 
 pub struct Ui {
@@ -242,8 +274,6 @@ pub struct Ui {
     rail_revealer: Revealer,
     rail_wrap: GtkBox,
     rail_search: Entry,
-    seg_recent: ToggleButton,
-    seg_project: ToggleButton,
     rail_list: GtkBox,
     transcript_scroll: ScrolledWindow,
     durable_box: GtkBox,
@@ -278,8 +308,7 @@ pub struct Ui {
     attached_kind: Option<BackendKind>,
     metas: Vec<SessionMeta>,
     settings: Settings,
-    grouping: Grouping,
-    collapsed: HashSet<String>,
+    earlier_collapsed: bool,
     session_models: HashMap<String, String>,
     context_usage: HashMap<String, f64>,
     scroll_mem: HashMap<String, (f64, bool)>,
@@ -435,19 +464,6 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     rail_search.add_css_class("rail-search");
     rail_search.set_placeholder_text(Some("Filter…"));
 
-    let segmented = GtkBox::new(Orientation::Horizontal, 0);
-    segmented.add_css_class("rail-segmented");
-    segmented.set_homogeneous(true);
-    let seg_recent = ToggleButton::with_label("Recent");
-    seg_recent.add_css_class("rail-segment");
-    seg_recent.add_css_class("rail-segment-active");
-    seg_recent.set_active(true);
-    let seg_project = ToggleButton::with_label("Project");
-    seg_project.add_css_class("rail-segment");
-    seg_project.set_group(Some(&seg_recent));
-    segmented.append(&seg_recent);
-    segmented.append(&seg_project);
-
     let rail_list = GtkBox::new(Orientation::Vertical, 0);
     rail_list.set_vexpand(true);
     let rail_scroll = ScrolledWindow::new();
@@ -458,7 +474,6 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     rail_wrap.append(&rail_head);
     rail_wrap.append(&share_link_reveal);
     rail_wrap.append(&rail_search);
-    rail_wrap.append(&segmented);
     rail_wrap.append(&rail_scroll);
 
     let rail_revealer = Revealer::new();
@@ -754,8 +769,6 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         rail_revealer,
         rail_wrap,
         rail_search,
-        seg_recent: seg_recent.clone(),
-        seg_project: seg_project.clone(),
         rail_list,
         transcript_scroll,
         durable_box,
@@ -790,8 +803,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         attached_kind: None,
         metas: Vec::new(),
         settings,
-        grouping: Grouping::Recent,
-        collapsed: HashSet::new(),
+        earlier_collapsed: true,
         session_models: HashMap::new(),
         context_usage: HashMap::new(),
         scroll_mem: HashMap::new(),
@@ -888,25 +900,11 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         let _ = ui.borrow().cmd.try_send(Cmd::RefreshSessions);
     }));
 
-    // rail search + grouping
+    // rail search
     {
         let u = ui.borrow();
         u.rail_search.connect_changed(glib::clone!(#[strong] ui, move |_| render_rail(&ui)));
     }
-    seg_recent.connect_toggled(glib::clone!(#[strong] ui, move |b| {
-        if b.is_active() {
-            ui.borrow_mut().grouping = Grouping::Recent;
-            sync_segment_css(&ui);
-            render_rail(&ui);
-        }
-    }));
-    seg_project.connect_toggled(glib::clone!(#[strong] ui, move |b| {
-        if b.is_active() {
-            ui.borrow_mut().grouping = Grouping::Project;
-            sync_segment_css(&ui);
-            render_rail(&ui);
-        }
-    }));
 
     // ── rail resize drag ──────────────────────────────────────────
     {
@@ -1228,17 +1226,6 @@ fn set_theme(ui: &Rc<RefCell<Ui>>, name: &str) {
     let _ = u.settings.save();
     for buf in &u.buffers {
         style_buffer(buf, name);
-    }
-}
-
-fn sync_segment_css(ui: &Rc<RefCell<Ui>>) {
-    let u = ui.borrow();
-    for (btn, mode) in [(&u.seg_recent, Grouping::Recent), (&u.seg_project, Grouping::Project)] {
-        if u.grouping == mode {
-            btn.add_css_class("rail-segment-active");
-        } else {
-            btn.remove_css_class("rail-segment-active");
-        }
     }
 }
 
@@ -1677,23 +1664,11 @@ fn relative_time(ts: chrono::DateTime<chrono::Utc>) -> String {
     }
 }
 
-fn session_status(u: &Ui, id: &str) -> &'static str {
-    if u.selected_id.as_deref() == Some(id) {
-        if u.stream.streaming {
-            "ACTIVE"
-        } else {
-            "IDLE"
-        }
-    } else {
-        "CLOSED"
-    }
-}
-
 fn render_rail(ui: &Rc<RefCell<Ui>>) {
     let u = ui.borrow();
     clear_box(&u.rail_list);
     let query = u.rail_search.text().to_lowercase();
-    let filtered: Vec<&SessionMeta> = u
+    let mut filtered: Vec<&SessionMeta> = u
         .metas
         .iter()
         .filter(|m| {
@@ -1707,7 +1682,7 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
                 .cloned()
                 .unwrap_or_default()
                 .to_lowercase();
-            let status = session_status(&u, &m.id).to_lowercase();
+            let status = RailStatus::from_meta(m).label().to_lowercase();
             title.contains(&query)
                 || m.cwd.to_lowercase().contains(&query)
                 || m.machine.to_lowercase().contains(&query)
@@ -1716,66 +1691,47 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
         })
         .collect();
 
-    let sections: Vec<(String, Vec<&SessionMeta>)> = match u.grouping {
-        Grouping::Recent => {
-            let (running, saved): (Vec<_>, Vec<_>) = filtered
-                .into_iter()
-                .partition(|m| u.selected_id.as_deref() == Some(m.id.as_str()));
-            let mut v = Vec::new();
-            if !running.is_empty() {
-                v.push(("Running".to_string(), running));
-            }
-            if !saved.is_empty() {
-                v.push(("Saved".to_string(), saved));
-            }
-            v
-        }
-        Grouping::Project => {
-            let mut order: Vec<String> = Vec::new();
-            let mut map: HashMap<String, Vec<&SessionMeta>> = HashMap::new();
-            for m in filtered {
-                let key = m.cwd.clone();
-                if !map.contains_key(&key) {
-                    order.push(key.clone());
-                }
-                map.entry(key).or_default().push(m);
-            }
-            order
-                .into_iter()
-                .map(|k| (k.clone(), map.remove(&k).unwrap()))
-                .collect()
-        }
-    };
+    filtered.sort_by(|a, b| {
+        RailStatus::from_meta(a)
+            .cmp(&RailStatus::from_meta(b))
+            .then_with(|| b.last_active.cmp(&a.last_active))
+    });
 
-    for (name, items) in sections {
-        let collapsed = u.collapsed.contains(&name);
-        let header_btn = Button::new();
-        header_btn.add_css_class("card-header-btn");
-        let row = GtkBox::new(Orientation::Horizontal, 4);
-        let chev = Label::new(Some(if collapsed { "▸" } else { "▾" }));
-        chev.add_css_class("card-chevron");
-        let lbl = Label::new(Some(&name.to_uppercase()));
-        lbl.add_css_class("rail-section");
-        lbl.set_xalign(0.0);
-        row.append(&chev);
-        row.append(&lbl);
-        header_btn.set_child(Some(&row));
-        let name_c = name.clone();
-        header_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
-            let mut u = ui.borrow_mut();
-            if !u.collapsed.remove(&name_c) {
-                u.collapsed.insert(name_c.clone());
-            }
-            drop(u);
-            render_rail(&ui);
-        }));
-        u.rail_list.append(&header_btn);
-        if collapsed {
-            continue;
-        }
-        for meta in items {
-            u.rail_list.append(&rail_row(ui, meta));
-        }
+    let (current, earlier): (Vec<&SessionMeta>, Vec<&SessionMeta>) =
+        filtered.into_iter().partition(|m| !ended_earlier(m));
+
+    for meta in current {
+        u.rail_list.append(&rail_row(ui, meta));
+    }
+
+    if earlier.is_empty() {
+        return;
+    }
+
+    let collapsed = u.earlier_collapsed;
+    let header_btn = Button::new();
+    header_btn.add_css_class("card-header-btn");
+    let row = GtkBox::new(Orientation::Horizontal, 4);
+    let chev = Label::new(Some(if collapsed { "▸" } else { "▾" }));
+    chev.add_css_class("card-chevron");
+    let lbl = Label::new(Some("Earlier"));
+    lbl.add_css_class("rail-section");
+    lbl.set_xalign(0.0);
+    row.append(&chev);
+    row.append(&lbl);
+    header_btn.set_child(Some(&row));
+    header_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+        let mut u = ui.borrow_mut();
+        u.earlier_collapsed = !u.earlier_collapsed;
+        drop(u);
+        render_rail(&ui);
+    }));
+    u.rail_list.append(&header_btn);
+    if collapsed {
+        return;
+    }
+    for meta in earlier {
+        u.rail_list.append(&rail_row(ui, meta));
     }
 }
 
@@ -1793,11 +1749,10 @@ fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &SessionMeta) -> GtkBox {
     t.add_css_class("rail-row-title");
     t.set_xalign(0.0);
     t.set_ellipsize(pango::EllipsizeMode::End);
-    let status = Label::new(Some(session_status(&u, &meta.id)));
+    let st = RailStatus::from_meta(meta);
+    let status = Label::new(Some(st.label()));
     status.add_css_class("rail-status");
-    if u.selected_id.as_deref() == Some(meta.id.as_str()) && u.stream.streaming {
-        status.add_css_class("active");
-    }
+    status.add_css_class(st.css_class());
     let top_cb = gtk4::CenterBox::new();
     top_cb.set_start_widget(Some(&t));
     top_cb.set_end_widget(Some(&status));
@@ -2098,9 +2053,21 @@ fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
 }
 
 fn set_streaming(ui: &Rc<RefCell<Ui>>, on: bool) {
-    ui.borrow_mut().stream.streaming = on;
+    {
+        let mut u = ui.borrow_mut();
+        u.stream.streaming = on;
+        let id = u.selected_id.clone();
+        if let Some(id) = id {
+            if let Some(m) = u.metas.iter_mut().find(|m| m.id == id) {
+                m.working = Some(on);
+                if on {
+                    m.live = Some(true);
+                }
+            }
+        }
+    }
     sync_composer_mode(ui);
-    render_rail(ui); // ACTIVE/IDLE status refresh
+    render_rail(ui);
 }
 
 fn sync_composer_mode(ui: &Rc<RefCell<Ui>>) {
@@ -2325,6 +2292,16 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             let _ = ui.borrow().cmd.try_send(Cmd::RefreshState);
         }
         SessionEvent::ProcessExited { code } => {
+            {
+                let mut u = ui.borrow_mut();
+                let id = u.selected_id.clone();
+                if let Some(id) = id {
+                    if let Some(m) = u.metas.iter_mut().find(|m| m.id == id) {
+                        m.live = Some(false);
+                        m.working = Some(false);
+                    }
+                }
+            }
             set_streaming(ui, false);
             show_toast(
                 ui,

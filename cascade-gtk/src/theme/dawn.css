@@ -830,8 +830,10 @@ selection {
 /* Rail row extras. */
 .rail-row-title { color: #575279; font-size: 10pt; font-weight: 600; }
 .rail-row-sub { color: #797593; font-size: 8.5pt; }
-.rail-status { color: #797593; font-size: 8pt; font-weight: 700; }
-.rail-status.active { color: #EA9D34; }
+.rail-status { font-size: 8pt; font-weight: 700; }
+.rail-status.live { color: #EA9D34; }
+.rail-status.idle { color: #797593; }
+.rail-status.ended { color: #9893A5; font-weight: 500; }
 .context-bar trough {
   background-color: rgba(223, 218, 217, 0.8);
   min-height: 3px;

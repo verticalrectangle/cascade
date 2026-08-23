@@ -867,6 +867,21 @@ fn pump_inbox(ev: &SessionEvent, inbox: &Inbox, ui_tx: &async_channel::Sender<Ui
     }
 }
 
+async fn annotate_local_process_status(manager: &SessionManager, list: &mut [SessionMeta]) {
+    for m in list.iter_mut() {
+        match manager.get(&m.id).await {
+            Some(sess) => {
+                m.live = Some(true);
+                m.working = Some(sess.is_streaming().await);
+            }
+            None => {
+                m.live = Some(false);
+                m.working = Some(false);
+            }
+        }
+    }
+}
+
 async fn push_sessions(
     manager: &SessionManager,
     cloud: Option<&CloudClient>,
@@ -874,6 +889,7 @@ async fn push_sessions(
     ui_tx: &async_channel::Sender<UiMsg>,
 ) {
     let mut list = manager.list().await;
+    annotate_local_process_status(manager, &mut list).await;
     terminal_links.clear();
     if let Some(c) = cloud {
         match c.list_sessions().await {
@@ -892,6 +908,11 @@ async fn push_sessions(
                     .send(UiMsg::Error(format!("list cloud sessions: {e:#}")))
                     .await;
             }
+        }
+    }
+    for m in &mut list {
+        if m.kind == "terminal" && m.live.is_none() {
+            m.live = Some(true);
         }
     }
     list.sort_by(|a, b| b.last_active.cmp(&a.last_active));

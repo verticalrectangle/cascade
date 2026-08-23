@@ -150,7 +150,8 @@ impl CloudClient {
         };
         let mut out = Vec::new();
         for v in arr {
-            out.push(serde_json::from_value(v)?);
+            // ListedSession JSON includes optional live/working on SessionMeta.
+            out.push(serde_json::from_value::<SessionMeta>(v)?);
         }
         Ok(out)
     }

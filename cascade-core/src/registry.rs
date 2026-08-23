@@ -34,6 +34,12 @@ pub struct SessionMeta {
     /// Owning account uid. Empty on desktop-local rows.
     #[serde(default)]
     pub owner: String,
+    /// Process exists. `None` = unknown (relay could not answer).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
+    /// Actively streaming. `None` = unknown; `None` with `live == true` → IDLE.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working: Option<bool>,
 }
 
 impl SessionRegistry {
@@ -160,6 +166,8 @@ fn row_to_meta(row: &rusqlite::Row<'_>) -> rusqlite::Result<SessionMeta> {
         view_handle: None,
         pid: None,
         owner: row.get::<_, String>(8).unwrap_or_default(),
+        live: None,
+        working: None,
     })
 }
 
