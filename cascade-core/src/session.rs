@@ -147,9 +147,34 @@ pub struct SessionSnapshot {
     pub todos: Vec<TodoPhase>,
     pub streaming: bool,
     pub pending_ui: Vec<UiRequest>,
+    /// Paging: absolute index of `messages[0]` in the full transcript.
+    /// Zero when paging was not requested (full snapshot).
+    #[serde(default)]
+    pub oldest_index: u64,
+    /// Paging: total transcript length at cut time; 0 when unpaged.
+    #[serde(default)]
+    pub total_messages: u64,
+    /// Paging: older messages exist below `oldest_index`.
+    #[serde(default)]
+    pub has_more: bool,
 }
 
 impl SessionSnapshot {
+    /// Cut a page out of a full snapshot. `before` is an exclusive absolute
+    /// upper index (`None` = tail page). Indices are positions in the full
+    /// transcript; the returned page carries its cursor so the caller can
+    /// walk upward with `before = oldest_index`.
+    pub fn paged(mut self, limit: usize, before: Option<u64>) -> Self {
+        let total = self.messages.len() as u64;
+        let end = before.map_or(total, |b| b.min(total)) as usize;
+        let start = end.saturating_sub(limit);
+        self.messages = self.messages[start..end].to_vec();
+        self.total_messages = total;
+        self.oldest_index = start as u64;
+        self.has_more = start > 0;
+        self
+    }
+
     /// Fold a live event into the snapshot a late joiner would receive.
     pub fn apply(&mut self, ev: &SessionEvent) {
         match ev {

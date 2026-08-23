@@ -5,7 +5,7 @@
 //! browser pane (right), first-run login overlay.
 
 use std::cell::{Cell, RefCell};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::time::Duration;
@@ -38,6 +38,8 @@ const RAIL_MAX: i32 = 400;
 const PANE_MIN: i32 = 280;
 const PANE_MAX: i32 = 600;
 const FOLLOW_MARGIN: f64 = 48.0;
+/// Scroll distance from the transcript top that triggers a history page.
+const HISTORY_TRIGGER: f64 = 150.0;
 
 // ── theme palettes (verbatim values from theme-dawn/moon.css) ────────
 
@@ -281,6 +283,13 @@ pub struct Ui {
     live_box: GtkBox,
     follow: Cell<bool>,
     programmatic: Cell<bool>,
+    // transcript history paging (tail-first render, older pages prepend)
+    history: VecDeque<serde_json::Value>,
+    history_oldest_rendered: u64,
+    history_server_more: bool,
+    history_loading: bool,
+    history_has_content: bool,
+    history_status: Label,
     plan_reveal: Revealer,
     plan_box: GtkBox,
     question_host: GtkBox,
@@ -310,7 +319,7 @@ pub struct Ui {
     metas: Vec<ListedSession>,
     machine_names: HashMap<String, String>,
     settings: Settings,
-    earlier_collapsed: bool,
+    ended_collapsed: bool,
     session_models: HashMap<String, String>,
     context_usage: HashMap<String, f64>,
     scroll_mem: HashMap<String, (f64, bool)>,
@@ -513,6 +522,13 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     let transcript_box = GtkBox::new(Orientation::Vertical, 12);
     transcript_box.add_css_class("transcript");
     transcript_box.set_valign(gtk4::Align::Start);
+    // History paging status row: "loading earlier…" while a page is in
+    // flight, "start of session" once the top is reached. Survives
+    // clear_box(durable_box) on re-attach because it lives outside it.
+    let history_status = Label::new(None);
+    history_status.add_css_class("rail-section");
+    history_status.set_visible(false);
+    transcript_box.append(&history_status);
     transcript_box.append(&durable_box);
     transcript_box.append(&live_box);
 
@@ -794,6 +810,12 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         live_box,
         follow: Cell::new(true),
         programmatic: Cell::new(false),
+        history: VecDeque::new(),
+        history_oldest_rendered: 0,
+        history_server_more: false,
+        history_loading: false,
+        history_has_content: false,
+        history_status,
         plan_reveal,
         plan_box,
         question_host,
@@ -823,7 +845,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         metas: Vec::new(),
         machine_names: HashMap::new(),
         settings,
-        earlier_collapsed: true,
+        ended_collapsed: true,
         session_models: HashMap::new(),
         context_usage: HashMap::new(),
         scroll_mem: HashMap::new(),
@@ -983,10 +1005,21 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     {
         let adj = ui.borrow().transcript_scroll.vadjustment();
         adj.connect_value_changed(glib::clone!(#[strong] ui, move |adj| {
-            let u = ui.borrow();
-            if !u.programmatic.get() {
-                let at_bottom = adj.value() >= adj.upper() - adj.page_size() - FOLLOW_MARGIN;
-                u.follow.set(at_bottom);
+            let near_top = {
+                let u = ui.borrow();
+                !u.programmatic.get() && {
+                    let at_bottom = adj.value() >= adj.upper() - adj.page_size() - FOLLOW_MARGIN;
+                    u.follow.set(at_bottom);
+                    adj.value() < HISTORY_TRIGGER
+                }
+            };
+            if near_top {
+                // Defer: the follow tick-callback emits value-changed from
+                // inside set_value while holding a Ui borrow — paging here
+                // synchronously would double-borrow the RefCell.
+                glib::idle_add_local_once(glib::clone!(#[strong] ui, move || {
+                    try_load_history(&ui);
+                }));
             }
         }));
         // frame-tick follow: scroll after layout when pinned
@@ -1397,6 +1430,23 @@ fn append_user_bubble(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf]) {
 /// Optimistic render at send time; MessageEnd(user) echoes the same message
 /// back — skip the duplicate.
 fn append_user_bubble_inner(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf], from_echo: bool) {
+    let target = if ui.borrow().stream.streaming {
+        ui.borrow().live_box.clone()
+    } else {
+        ui.borrow().durable_box.clone()
+    };
+    user_bubble_into(ui, &target, text, images, from_echo);
+}
+
+/// Build a user bubble into an explicit parent — shared by the live append
+/// path and history-page prepending (off-tree staging box).
+fn user_bubble_into(
+    ui: &Rc<RefCell<Ui>>,
+    target: &GtkBox,
+    text: &str,
+    images: &[PathBuf],
+    from_echo: bool,
+) {
     if !from_echo {
         ui.borrow_mut().stream.last_user_echo =
             Some((text.to_string(), std::time::Instant::now()));
@@ -1435,11 +1485,6 @@ fn append_user_bubble_inner(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf]
         }
     }
 
-    let target = if ui.borrow().stream.streaming {
-        ui.borrow().live_box.clone()
-    } else {
-        ui.borrow().durable_box.clone()
-    };
     target.append(&bubble);
 }
 
@@ -1736,12 +1781,32 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
         }
     }
     if !ended.is_empty() {
-        let h = Label::new(Some("ENDED"));
-        h.add_css_class("rail-section");
-        h.set_xalign(0.0);
-        u.rail_list.append(&h);
-        for meta in ended {
-            u.rail_list.append(&rail_row(ui, meta));
+        // History collapses to a header by default — 600 dead rows would
+        // drown the LIVE group. The count stays visible; search forces
+        // expansion so filtering never hides matches behind the fold.
+        let collapsed = u.ended_collapsed && query.is_empty();
+        let header_btn = Button::new();
+        header_btn.add_css_class("card-header-btn");
+        let row = GtkBox::new(Orientation::Horizontal, 4);
+        let chev = Label::new(Some(if collapsed { "▸" } else { "▾" }));
+        chev.add_css_class("card-chevron");
+        let lbl = Label::new(Some(&format!("ENDED ({})", ended.len())));
+        lbl.add_css_class("rail-section");
+        lbl.set_xalign(0.0);
+        row.append(&chev);
+        row.append(&lbl);
+        header_btn.set_child(Some(&row));
+        header_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+            let mut u = ui.borrow_mut();
+            u.ended_collapsed = !u.ended_collapsed;
+            drop(u);
+            render_rail(&ui);
+        }));
+        u.rail_list.append(&header_btn);
+        if !collapsed {
+            for meta in ended {
+                u.rail_list.append(&rail_row(ui, meta));
+            }
         }
     }
 }
@@ -1946,6 +2011,12 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                     }
                     None => u.model_pill.set_visible(false),
                 }
+                u.history.clear();
+                u.history_oldest_rendered = 0;
+                u.history_server_more = false;
+                u.history_loading = false;
+                u.history_has_content = false;
+                u.history_status.set_visible(false);
                 clear_box(&u.durable_box);
                 clear_box(&u.live_box);
                 clear_box(&u.question_host);
@@ -2053,18 +2124,47 @@ fn parse_agent_message(v: &serde_json::Value) -> Option<(String, String)> {
 }
 
 fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
+    let is_page = {
+        let u = ui.borrow();
+        u.history_loading && snap.oldest_index < u.history_oldest_rendered
+    };
+    if is_page {
+        apply_history_page(ui, snap);
+        return;
+    }
+    apply_snapshot_tail(ui, snap);
+}
+
+/// Fresh attach / re-snapshot: render only the newest page, pin to the
+/// bottom. Older messages are buffered client-side (full snapshots from
+/// local/shared attaches) or left on the server (`has_more`).
+fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
+    const PAGE: usize = crate::worker::HISTORY_PAGE_U32 as usize;
     let durable = ui.borrow().durable_box.clone();
-    for msg in snap.messages {
-        if let Some((role, text)) = parse_agent_message(&msg) {
-            if text.is_empty() {
-                continue;
-            }
-            if role == "user" || role == "human" {
-                append_user_bubble(ui, &text, &[]);
-            } else {
-                render_markdown_into(ui, &durable, &text);
-            }
+    let mut msgs = snap.messages;
+    {
+        let mut u = ui.borrow_mut();
+        u.history.clear();
+        u.history_loading = false;
+        if msgs.len() > PAGE {
+            let keep = msgs.split_off(msgs.len() - PAGE);
+            u.history = msgs.into_iter().collect();
+            msgs = keep;
         }
+        let total = if snap.total_messages > 0 {
+            snap.total_messages
+        } else {
+            u.history.len() as u64 + msgs.len() as u64
+        };
+        // Absolute index of the oldest message now on screen. For unpaged
+        // (full) snapshots oldest_index is 0, so this is the buffer size.
+        u.history_oldest_rendered = snap.oldest_index + (total - snap.oldest_index - msgs.len() as u64);
+        u.history_server_more = snap.has_more;
+        u.history_has_content = !msgs.is_empty() || !u.history.is_empty();
+        u.follow.set(true);
+    }
+    for msg in msgs {
+        render_history_message(ui, &durable, &msg);
     }
     render_plan(ui, &snap.todos);
     if snap.streaming {
@@ -2072,6 +2172,130 @@ fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
     }
     for req in snap.pending_ui {
         show_ui_request(ui, req);
+    }
+    update_history_status(ui);
+}
+
+/// One message into an explicit parent — shared by tail render and prepend.
+fn render_history_message(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_json::Value) {
+    if let Some((role, text)) = parse_agent_message(msg) {
+        if text.is_empty() {
+            return;
+        }
+        if role == "user" || role == "human" {
+            user_bubble_into(ui, parent, &text, &[], true);
+        } else {
+            render_markdown_into(ui, parent, &text);
+        }
+    }
+}
+
+/// Older page from the server: prepend above the current transcript while
+/// holding the viewport steady.
+fn apply_history_page(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
+    {
+        let mut u = ui.borrow_mut();
+        u.history_oldest_rendered = snap.oldest_index;
+        u.history_server_more = snap.has_more;
+        u.history_loading = false;
+    }
+    prepend_messages(ui, snap.messages);
+    update_history_status(ui);
+}
+
+/// Render older messages off-tree, insert them at the top of the durable
+/// transcript, and restore the scroll position so the content on screen
+/// does not jump.
+fn prepend_messages(ui: &Rc<RefCell<Ui>>, msgs: Vec<serde_json::Value>) {
+    let scroll = ui.borrow().transcript_scroll.clone();
+    let adj = scroll.vadjustment();
+    let old_value = adj.value();
+    let old_upper = adj.upper();
+    let staging = GtkBox::new(Orientation::Vertical, 12);
+    for msg in &msgs {
+        render_history_message(ui, &staging, msg);
+    }
+    let durable = ui.borrow().durable_box.clone();
+    let mut anchor: Option<gtk4::Widget> = None;
+    while let Some(child) = staging.first_child() {
+        staging.remove(&child);
+        match &anchor {
+            None => durable.prepend(&child),
+            Some(a) => durable.insert_child_after(&child, Some(a)),
+        }
+        anchor = Some(child);
+    }
+    let programmatic = ui.borrow().programmatic.clone();
+    glib::idle_add_local_once(move || {
+        let adj = scroll.vadjustment();
+        let grown = adj.upper() - old_upper;
+        if grown > 0.0 {
+            programmatic.set(true);
+            adj.set_value(old_value + grown);
+            programmatic.set(false);
+        }
+    });
+}
+
+/// Scroll near the top: render the next page from the local buffer, or ask
+/// the server for the next older page. No-op while a page is in flight.
+fn try_load_history(ui: &Rc<RefCell<Ui>>) {
+    enum Next {
+        Buffer(Vec<serde_json::Value>),
+        Server(u64),
+        None,
+    }
+    let next = {
+        let u = ui.borrow();
+        if u.history_loading || u.selected_id.is_none() {
+            Next::None
+        } else if !u.history.is_empty() {
+            const PAGE: usize = crate::worker::HISTORY_PAGE_U32 as usize;
+            let n = PAGE.min(u.history.len());
+            Next::Buffer(u.history.iter().skip(u.history.len() - n).cloned().collect())
+        } else if u.history_server_more
+            && !u.read_only
+            && matches!(u.attached_kind, Some(BackendKind::Cloud))
+        {
+            Next::Server(u.history_oldest_rendered)
+        } else {
+            Next::None
+        }
+    };
+    match next {
+        Next::Buffer(page) => {
+            let n = page.len() as u64;
+            {
+                let mut u = ui.borrow_mut();
+                let keep = u.history.len() - page.len();
+                u.history.truncate(keep);
+                u.history_oldest_rendered = u.history_oldest_rendered.saturating_sub(n);
+            }
+            prepend_messages(ui, page);
+            update_history_status(ui);
+        }
+        Next::Server(before) => {
+            ui.borrow_mut().history_loading = true;
+            let _ = ui.borrow().cmd.try_send(Cmd::LoadHistory { before });
+            update_history_status(ui);
+        }
+        Next::None => {}
+    }
+}
+
+fn update_history_status(ui: &Rc<RefCell<Ui>>) {
+    let u = ui.borrow();
+    let label = &u.history_status;
+    if u.history_loading {
+        label.set_text("loading earlier…");
+        label.set_visible(true);
+    } else if !u.history.is_empty() || u.history_server_more {
+        label.set_visible(false);
+    } else if u.history_has_content && u.history_oldest_rendered == 0 {
+        label.set_text("start of session");
+        label.set_visible(true);
+    } else {
+        label.set_visible(false);
     }
 }
 

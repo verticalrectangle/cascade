@@ -31,6 +31,15 @@ pub enum CloudCommand {
     /// Ask the daemon to re-emit session state (model/thinking/etc.) as a
     /// `state_changed` event on this stream.
     GetState,
+    /// Request a transcript page. `limit` bounds the page size; `before` is
+    /// the exclusive absolute upper index (`None` = tail page). The daemon
+    /// answers with a `snapshot` event carrying `oldest_index`/`has_more`.
+    GetSnapshot {
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        before: Option<u64>,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -307,7 +316,21 @@ impl CloudClient {
         mpsc::UnboundedReceiver<SessionEvent>,
         mpsc::UnboundedSender<CloudCommand>,
     )> {
-        self.attach_with_bearer(session_id, &self.token).await
+        self.attach_with_bearer(session_id, &self.token, None).await
+    }
+
+    /// Attach and ask the daemon for a tail-only initial snapshot of
+    /// `tail` messages; older pages are fetched with
+    /// [`CloudCommand::GetSnapshot`] on scroll-up.
+    pub async fn attach_paged(
+        &self,
+        session_id: &str,
+        tail: u32,
+    ) -> Result<(
+        mpsc::UnboundedReceiver<SessionEvent>,
+        mpsc::UnboundedSender<CloudCommand>,
+    )> {
+        self.attach_with_bearer(session_id, &self.token, Some(tail)).await
     }
 
     /// Same stream as [`Self::attach`], but the share token is the Bearer.
@@ -319,18 +342,22 @@ impl CloudClient {
         mpsc::UnboundedReceiver<SessionEvent>,
         mpsc::UnboundedSender<CloudCommand>,
     )> {
-        self.attach_with_bearer(session_id, share_token).await
+        self.attach_with_bearer(session_id, share_token, None).await
     }
 
     async fn attach_with_bearer(
         &self,
         session_id: &str,
         bearer_token: &str,
+        tail: Option<u32>,
     ) -> Result<(
         mpsc::UnboundedReceiver<SessionEvent>,
         mpsc::UnboundedSender<CloudCommand>,
     )> {
-        let ws_url = http_to_ws(&self.base_url, session_id);
+        let mut ws_url = http_to_ws(&self.base_url, session_id);
+        if let Some(t) = tail {
+            ws_url = format!("{ws_url}?tail={t}");
+        }
         let mut req = ws_url
             .as_str()
             .into_client_request()

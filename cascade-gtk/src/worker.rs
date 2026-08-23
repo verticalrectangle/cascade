@@ -10,6 +10,10 @@ use tokio::task::AbortHandle;
 
 use crate::settings::Settings;
 
+/// Transcript page size: messages per snapshot page, both directions
+/// (initial tail and scroll-up history pages).
+pub(crate) const HISTORY_PAGE_U32: u32 = 100;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BackendKind {
     Local,
@@ -132,6 +136,7 @@ pub enum Cmd {
     Logout,
     SaveCloudUrl(String),
     RefreshSessions,
+    LoadHistory { before: u64 },
     NewSession {
         kind: BackendKind,
         cwd: String,
@@ -442,6 +447,14 @@ pub async fn worker(
             Cmd::SaveCloudUrl(url) => {
                 settings.cloud_url = url;
                 let _ = settings.save();
+            }
+            Cmd::LoadHistory { before } => {
+                if let Some(SessionBackend::Cloud { cmd, .. }) = current.as_ref() {
+                    let _ = cmd.send(CloudCommand::GetSnapshot {
+                        limit: Some(HISTORY_PAGE_U32),
+                        before: Some(before),
+                    });
+                }
             }
             Cmd::RefreshSessions => {
                 push_sessions(&manager, cloud.as_ref(), &mut terminal_links, &ui_tx).await;
@@ -957,10 +970,15 @@ async fn attach_cloud(
     settings: &Settings,
     inbox: &Inbox,
 ) {
+    // Owner attach pages the transcript (tail first, older on scroll-up);
+    // shared/guest attach still gets the full snapshot — read-only streams
+    // drop page commands, and the client buffers the overflow locally.
     let result = if let Some(tok) = share_token {
         client.attach_shared(session_id, tok).await
     } else {
-        client.attach(session_id).await
+        client
+            .attach_paged(session_id, HISTORY_PAGE_U32)
+            .await
     };
     match result {
         Ok((ev_rx, cmd_tx)) => {

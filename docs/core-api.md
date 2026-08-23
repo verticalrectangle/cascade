@@ -113,6 +113,13 @@ pub struct SessionSnapshot {
     pub todos: Vec<TodoPhase>,
     pub streaming: bool,
     pub pending_ui: Vec<UiRequest>,
+    // Paging (all zero/false when unpaged): oldest_index = absolute index of
+    // messages[0] in the full transcript; total_messages = full length at cut
+    // time; has_more = older pages exist. Page with
+    // CloudCommand::GetSnapshot { limit, before: Some(oldest_index) }.
+    pub oldest_index: u64,
+    pub total_messages: u64,
+    pub has_more: bool,
 }
 
 /// serde-translated RpcSessionState (get_state data) — camelCase passthrough.
@@ -185,6 +192,14 @@ impl CloudClient {
     pub async fn delete_session(&self, id: &str) -> anyhow::Result<()>;
     /// Attach to event stream; send commands via returned sender.
     pub async fn attach(&self, session_id: &str)
+        -> anyhow::Result<(tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
+                           tokio::sync::mpsc::UnboundedSender<CloudCommand>)>;
+    /// Same, but the initial snapshot is only the newest `tail` messages
+    /// (`?tail=N` on the stream URL). Older history pages stream up through
+    /// the same socket via `CloudCommand::GetSnapshot { limit, before }`.
+    /// GTK attaches with tail=100 and renders tail-first; attach_shared
+    /// always delivers the full snapshot (read-only streams drop commands).
+    pub async fn attach_paged(&self, session_id: &str, tail: u32)
         -> anyhow::Result<(tokio::sync::mpsc::UnboundedReceiver<SessionEvent>,
                            tokio::sync::mpsc::UnboundedSender<CloudCommand>)>;
 }

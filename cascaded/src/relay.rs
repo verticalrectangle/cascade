@@ -423,13 +423,20 @@ impl RelayRouter {
         session_id: String,
         mut socket: WebSocket,
         read_only: bool,
+        tail: Option<u32>,
     ) {
         // Ask the desktop to start streaming this session (idempotent for
-        // already-spawned sessions) and to send a snapshot.
+        // already-spawned sessions) and to send a snapshot. `tail` bounds the
+        // initial snapshot to the newest N messages; the client pages older
+        // history up through the same stream.
+        let mut payload = serde_json::json!({ "kind": "get_snapshot" });
+        if let Some(t) = tail {
+            payload["limit"] = t.into();
+        }
         let env = RelayEnvelope {
             session_id: Some(session_id.clone()),
             req: None,
-            payload: serde_json::json!({ "kind": "get_snapshot" }),
+            payload,
         };
         let _ = self.send_to_machine(&machine_id, env).await;
 

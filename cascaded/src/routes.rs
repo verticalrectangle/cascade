@@ -87,6 +87,9 @@ pub struct ShareLookup {
 #[derive(Debug, Deserialize, Default)]
 pub struct StreamQuery {
     share: Option<String>,
+    /// Owner attaches may bound the initial snapshot to the newest N
+    /// messages; older pages stream up via `get_snapshot` commands.
+    tail: Option<u32>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -598,15 +601,17 @@ pub async fn session_stream(
     if let Some(session) = state.sessions.get(&id).await {
         let db_path = state.db_path.clone();
         let manager = state.sessions.clone();
+        let tail = if read_only { None } else { query.tail };
         return Ok(ws.on_upgrade(move |socket| {
-            handle_stream(socket, session, manager, read_only, db_path)
+            handle_stream(socket, session, manager, read_only, db_path, tail)
         }));
     }
     if let Some(machine) = state.relay.machine_of(&id) {
         if state.relay.machine_online(&machine).await {
             let router = state.relay.clone();
+            let tail = if read_only { None } else { query.tail };
             return Ok(ws.on_upgrade(move |socket| async move {
-                router.proxy_stream(machine, id, socket, read_only).await;
+                router.proxy_stream(machine, id, socket, read_only, tail).await;
             }));
         }
         if !read_only {
@@ -1109,6 +1114,7 @@ async fn handle_stream(
     manager: SessionManager,
     read_only: bool,
     db_path: PathBuf,
+    tail: Option<u32>,
 ) {
     let (mut sink, mut stream) = socket.split();
     let session_id = session.id().to_string();
@@ -1120,6 +1126,10 @@ async fn handle_stream(
         .and_then(|m| m.name);
 
     let snapshot = session.snapshot().await;
+    let snapshot = match tail {
+        Some(t) => snapshot.paged(t as usize, None),
+        None => snapshot,
+    };
     let frame = SessionEvent::Snapshot(snapshot);
     if let Ok(text) = serde_json::to_string(&frame) {
         let _ = sink.send(Message::Text(text.into())).await;
@@ -1183,6 +1193,17 @@ async fn handle_stream(
                                 }
                                 Err(e) => tracing::warn!(%e, "get_state failed"),
                             },
+                            Ok(CloudCommand::GetSnapshot { limit, before }) => {
+                                let snapshot = session.snapshot().await;
+                                let snapshot = match limit {
+                                    Some(l) => snapshot.paged(l as usize, before),
+                                    None => snapshot,
+                                };
+                                let frame = SessionEvent::Snapshot(snapshot);
+                                if let Ok(text) = serde_json::to_string(&frame) {
+                                    let _ = sink.send(Message::Text(text.into())).await;
+                                }
+                            }
                             Err(e) => {
                                 tracing::warn!(%e, "invalid CloudCommand");
                             }

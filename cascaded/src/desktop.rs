@@ -63,8 +63,27 @@ enum RelayPayload {
     Spawn { cwd: String, model: Option<String> },
     Shutdown,
     /// Late-joiner transcript replay: emit a Snapshot event for the session.
-    GetSnapshot,
+    /// `limit` bounds the page; `before` walks upward from an absolute index.
+    GetSnapshot {
+        #[serde(default)]
+        limit: Option<u32>,
+        #[serde(default)]
+        before: Option<u64>,
+    },
 }
+
+/// Parsed discovered transcripts, keyed by path + mtime so scroll-up pages
+/// don't re-parse multi-MB session files. Compaction rewrites the file →
+/// mtime changes → next page re-parses and indices realign to the new file.
+/// Sessions with a live tail task; each attach used to spawn another
+/// whole-file replay that never died. One tailer per session, removed on exit.
+type TailSet = std::sync::Arc<tokio::sync::Mutex<std::collections::HashSet<String>>>;
+
+type ReplayCache = std::sync::Arc<
+    tokio::sync::Mutex<
+        std::collections::HashMap<PathBuf, (std::time::SystemTime, std::sync::Arc<cascade_core::SessionSnapshot>)>,
+    >,
+>;
 
 /// Outbound side of the relay connection, shared by every task on this socket.
 type Out = mpsc::UnboundedSender<Message>;
@@ -81,6 +100,8 @@ pub async fn run_desktop(cfg: Config, mut shutdown: watch::Receiver<bool>) -> an
     let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
     let store = PathBuf::from(home).join(".omp/agent/sessions");
     let discovered: DiscoveredMap = Default::default();
+    let replay_cache: ReplayCache = Default::default();
+    let tailers: TailSet = Default::default();
     let watcher = cascade_core::watch::SessionWatcher::new(vec![store]);
 
     let cloud_url = cfg
@@ -111,6 +132,8 @@ pub async fn run_desktop(cfg: Config, mut shutdown: watch::Receiver<bool>) -> an
             &mut shutdown,
             watcher.clone(),
             &discovered,
+            &replay_cache,
+            &tailers,
         )
         .await
         {
@@ -161,6 +184,8 @@ async fn connect_and_serve(
     shutdown: &mut watch::Receiver<bool>,
     watcher: cascade_core::watch::SessionWatcher,
     discovered: &DiscoveredMap,
+    replay_cache: &ReplayCache,
+    tailers: &TailSet,
 ) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(url).await?;
     let (mut sink, mut stream) = ws.split();
@@ -272,11 +297,11 @@ async fn connect_and_serve(
             frame = stream.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        dispatch_envelope(&sessions, &text, &out_tx, discovered).await;
+                        dispatch_envelope(&sessions, &text, &out_tx, discovered, replay_cache, tailers).await;
                     }
                     Some(Ok(Message::Binary(b))) => {
                         if let Ok(text) = String::from_utf8(b.to_vec()) {
-                            dispatch_envelope(&sessions, &text, &out_tx, discovered).await;
+                            dispatch_envelope(&sessions, &text, &out_tx, discovered, replay_cache, tailers).await;
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {
@@ -299,6 +324,8 @@ async fn dispatch_envelope(
     text: &str,
     out: &Out,
     discovered: &DiscoveredMap,
+    replay_cache: &ReplayCache,
+    tailers: &TailSet,
 ) {
     let env: RelayEnvelope = match serde_json::from_str(text) {
         Ok(e) => e,
@@ -364,10 +391,14 @@ async fn dispatch_envelope(
                 tracing::warn!(%e, session_id = %id, "relay shutdown failed");
             }
         }
-        RelayPayload::GetSnapshot => {
+        RelayPayload::GetSnapshot { limit, before } => {
             let Some(id) = env.session_id.clone() else { return };
             if let Some(session) = session {
                 let snap = session.snapshot().await;
+                let snap = match limit {
+                    Some(l) => snap.paged(l as usize, before),
+                    None => snap,
+                };
                 let payload = serde_json::to_value(&SessionEvent::Snapshot(snap))
                     .unwrap_or(serde_json::Value::Null);
                 if let Some(msg) = RelayEnvelope::event(&id, payload).text() {
@@ -379,17 +410,47 @@ async fn dispatch_envelope(
             // live-tail appended entries as events. Read-only by definition.
             let path = discovered.lock().await.get(&id).cloned();
             let Some(path) = path else { return };
-            match cascade_core::replay::parse_snapshot(&path) {
+            let mtime = std::fs::metadata(&path)
+                .and_then(|m| m.modified())
+                .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let cached = replay_cache.lock().await.get(&path).cloned();
+            let parsed = match cached {
+                Some((t, snap)) if t == mtime => Ok(snap),
+                _ => match cascade_core::replay::parse_snapshot(&path) {
+                    Ok(snap) => {
+                        let snap = std::sync::Arc::new(snap);
+                        replay_cache
+                            .lock()
+                            .await
+                            .insert(path.clone(), (mtime, snap.clone()));
+                        Ok(snap)
+                    }
+                    Err(e) => Err(e),
+                },
+            };
+            match parsed {
                 Ok(snap) => {
-                    let payload = serde_json::to_value(&SessionEvent::Snapshot(snap))
+                    let page = match limit {
+                        Some(l) => (*snap).clone().paged(l as usize, before),
+                        None => (*snap).clone(),
+                    };
+                    let payload = serde_json::to_value(&SessionEvent::Snapshot(page))
                         .unwrap_or(serde_json::Value::Null);
                     if let Some(msg) = RelayEnvelope::event(&id, payload).text() {
                         let _ = out.send(msg);
                     }
-                    let out2 = out.clone();
-                    tokio::spawn(async move {
-                        tail_discovered(&id, path, out2).await;
-                    });
+                    // Live tailing starts once per session, on an initial
+                    // attach (no `before` cursor); page requests must not
+                    // spawn extras, and repeat attaches must not stack them.
+                    if before.is_none() && tailers.lock().await.insert(id.clone()) {
+                        let out2 = out.clone();
+                        let tailers2 = tailers.clone();
+                        let id2 = id.clone();
+                        tokio::spawn(async move {
+                            tail_discovered(&id2, path, out2).await;
+                            tailers2.lock().await.remove(&id2);
+                        });
+                    }
                 }
                 Err(e) => tracing::warn!(%e, session_id = %id, "replay failed"),
             }
@@ -457,7 +518,7 @@ async fn dispatch_envelope(
 /// them as session events. Stops when the relay socket drops or the file is
 /// deleted.
 async fn tail_discovered(id: &str, path: PathBuf, out: Out) {
-    let mut tailer = cascade_core::replay::FileTailer::new(path.clone());
+    let mut tailer = cascade_core::replay::FileTailer::from_end(path.clone());
     loop {
         tokio::time::sleep(Duration::from_millis(700)).await;
         if !path.exists() {

@@ -68,6 +68,18 @@ impl FileTailer {
         }
     }
 
+    /// Follow only lines appended after construction. Use when history is
+    /// delivered separately (snapshot) and this tailer is the live stream —
+    /// starting at 0 would replay the whole transcript as duplicate events.
+    pub fn from_end(path: PathBuf) -> Self {
+        let offset = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
+        Self {
+            path,
+            offset,
+            partial: Vec::new(),
+        }
+    }
+
     /// Read bytes appended since the last call and map complete lines to events.
     ///
     /// If the file shrank (rotation/rewrite), the offset resets to the start.
