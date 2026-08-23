@@ -246,12 +246,10 @@ impl RailStatus {
     }
 }
 
-fn ended_earlier(m: &ListedSession) -> bool {
-    let ended = RailStatus::from_meta(m) == RailStatus::Ended;
-    // Untitled managed sessions that already ended never did any work —
-    // pure debris, always tucked.
-    let empty_debris = ended && m.kind == "managed" && m.name.is_none();
-    empty_debris || (ended && (chrono::Utc::now() - m.last_active).num_hours() >= 24)
+/// Rows with no content never render — a session that never said anything
+/// isn't a session.
+fn is_empty_row(m: &ListedSession) -> bool {
+    m.empty.unwrap_or(false)
 }
 
 pub struct Ui {
@@ -1719,40 +1717,9 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
             .then_with(|| b.last_active.cmp(&a.last_active))
     });
 
-    let (current, earlier): (Vec<&ListedSession>, Vec<&ListedSession>) =
-        filtered.into_iter().partition(|m| !ended_earlier(m));
+    filtered.retain(|m| !is_empty_row(m));
 
-    for meta in current {
-        u.rail_list.append(&rail_row(ui, meta));
-    }
-
-    if earlier.is_empty() {
-        return;
-    }
-
-    let collapsed = u.earlier_collapsed;
-    let header_btn = Button::new();
-    header_btn.add_css_class("card-header-btn");
-    let row = GtkBox::new(Orientation::Horizontal, 4);
-    let chev = Label::new(Some(if collapsed { "▸" } else { "▾" }));
-    chev.add_css_class("card-chevron");
-    let lbl = Label::new(Some("Earlier"));
-    lbl.add_css_class("rail-section");
-    lbl.set_xalign(0.0);
-    row.append(&chev);
-    row.append(&lbl);
-    header_btn.set_child(Some(&row));
-    header_btn.connect_clicked(glib::clone!(#[strong] ui, move |_| {
-        let mut u = ui.borrow_mut();
-        u.earlier_collapsed = !u.earlier_collapsed;
-        drop(u);
-        render_rail(&ui);
-    }));
-    u.rail_list.append(&header_btn);
-    if collapsed {
-        return;
-    }
-    for meta in earlier {
+    for meta in filtered {
         u.rail_list.append(&rail_row(ui, meta));
     }
 }

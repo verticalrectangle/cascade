@@ -39,7 +39,13 @@ impl RelayEnvelope {
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum DesktopAnnounce {
     /// A transcript file appeared/changed on disk — list it under this machine.
-    SessionDiscovered { id: String, cwd: String, title: Option<String> },
+    SessionDiscovered {
+        id: String,
+        cwd: String,
+        title: Option<String>,
+        updated_at: String,
+        messages: u32,
+    },
     /// The file vanished.
     SessionGone { id: String },
 }
@@ -186,6 +192,8 @@ async fn connect_and_serve(
                 id: d.session_id,
                 cwd: d.cwd,
                 title: d.title,
+                updated_at: d.updated_at.to_rfc3339(),
+                messages: d.message_count,
             };
             if let Ok(p) = serde_json::to_value(&ann) {
                 if let Some(msg) = (RelayEnvelope { session_id: None, req: None, payload: p }).text() {
@@ -211,6 +219,8 @@ async fn connect_and_serve(
                         id: d.session_id,
                         cwd: d.cwd,
                         title: d.title,
+                        updated_at: d.updated_at.to_rfc3339(),
+                        messages: d.message_count,
                     };
                     if let Ok(p) = serde_json::to_value(&ann) {
                         if let Some(msg) = (RelayEnvelope { session_id: None, req: None, payload: p }).text() {

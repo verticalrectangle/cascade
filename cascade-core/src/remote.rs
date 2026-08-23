@@ -67,6 +67,12 @@ pub struct ListedSession {
     /// Actively streaming. `None` = unknown; `None` with `live == true` → IDLE.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub working: Option<bool>,
+    /// True when the session has no content — hide from default lists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub empty: Option<bool>,
+    /// "spawned" | "discovered" | "terminal".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 impl ListedSession {
@@ -87,6 +93,8 @@ impl ListedSession {
             pid: m.pid,
             live,
             working,
+            empty: None,
+            origin: None,
         }
     }
 }

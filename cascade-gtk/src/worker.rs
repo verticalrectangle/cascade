@@ -596,6 +596,20 @@ pub async fn worker(
                     if let Some(sess) = manager.get(&id).await {
                         attach_local(sess, &mut current, &mut pump, &ui_tx, &inbox, &settings)
                             .await;
+                    } else if let Some(client) = cloud.as_ref() {
+                        // Machine-hosted row (spawned or discovered on a desktop
+                        // daemon): attach through the cloud relay proxy.
+                        attach_cloud(
+                            client,
+                            &id,
+                            None,
+                            &mut current,
+                            &mut pump,
+                            &ui_tx,
+                            &settings,
+                            &inbox,
+                        )
+                        .await;
                     } else {
                         let _ = ui_tx
                             .send(UiMsg::Error(format!("local session {id} not running")))

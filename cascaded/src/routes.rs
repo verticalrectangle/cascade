@@ -219,6 +219,12 @@ pub struct ListedSession {
     /// Actively streaming right now (None = unknown).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub working: Option<bool>,
+    /// True when the session has no content — clients hide these from the list.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub empty: Option<bool>,
+    /// "spawned" | "discovered" | "terminal" (machine/terminal rows).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
 }
 
 pub async fn list_sessions(
@@ -240,6 +246,7 @@ pub async fn list_sessions(
             Some(sess) => (Some(true), Some(sess.is_streaming().await)),
             None => (Some(false), Some(false)),
         };
+        let empty = Some(m.name.is_none() && live == Some(false));
         out.push(ListedSession {
             id: m.id,
             omp_session_id: m.omp_session_id,
@@ -255,6 +262,8 @@ pub async fn list_sessions(
             pid: None,
             live,
             working,
+            empty,
+            origin: None,
         });
     }
     let db = state.db_path.clone();
@@ -267,7 +276,20 @@ pub async fn list_sessions(
         let created = chrono::DateTime::parse_from_rfc3339(&m.created_at)
             .map(|d| d.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
-        let live = Some(state.relay.machine_online(&m.machine).await);
+        let is_discovered = m.origin == "discovered";
+        // Discovered rows are alive by file freshness (15 min), not machine presence.
+        let last_active = m
+            .last_active
+            .as_deref()
+            .and_then(|t| chrono::DateTime::parse_from_rfc3339(t).ok())
+            .map(|d| d.with_timezone(&chrono::Utc))
+            .unwrap_or(created);
+        let live = if is_discovered {
+            Some((chrono::Utc::now() - last_active).num_minutes() < 15)
+        } else {
+            Some(state.relay.machine_online(&m.machine).await)
+        };
+        let empty = if is_discovered { Some(m.messages == 0) } else { Some(m.name.is_none() && live == Some(false)) };
         out.push(ListedSession {
             id: m.id,
             omp_session_id: None,
@@ -276,13 +298,15 @@ pub async fn list_sessions(
             session_file: None,
             machine: m.machine,
             created_at: created,
-            last_active: created,
+            last_active,
             kind: "managed".into(),
             join_handle: None,
             view_handle: None,
             pid: None,
             live,
             working: None,
+            empty,
+            origin: Some(m.origin),
         });
     }
     for t in terminals {
@@ -304,6 +328,8 @@ pub async fn list_sessions(
             pid: t.pid,
             live: Some(true),
             working: None,
+            empty: Some(false),
+            origin: Some("terminal".into()),
         });
     }
     Ok(Json(out))

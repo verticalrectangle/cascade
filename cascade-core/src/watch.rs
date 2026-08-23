@@ -31,6 +31,8 @@ pub struct DiscoveredSession {
     pub path: PathBuf,
     pub updated_at: DateTime<Utc>,
     pub size_bytes: u64,
+    /// Message entries seen in the head window (lower bound for big files).
+    pub message_count: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -196,6 +198,7 @@ fn parse_metadata(path: &Path) -> Option<DiscoveredSession> {
     let mut session_id = String::new();
     let mut cwd = String::new();
     let mut title = None;
+    let mut message_count = 0u32;
 
     for raw in buf.split(|b| *b == b'\n') {
         let line = strip_cr(raw);
@@ -223,6 +226,7 @@ fn parse_metadata(path: &Path) -> Option<DiscoveredSession> {
                     title = Some(t.to_string());
                 }
             }
+            "message" => message_count += 1,
             _ => {}
         }
     }
@@ -237,6 +241,7 @@ fn parse_metadata(path: &Path) -> Option<DiscoveredSession> {
         path: normalize_path(path),
         updated_at,
         size_bytes,
+        message_count,
     })
 }
 

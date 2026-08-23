@@ -51,6 +51,10 @@ struct RemoteSessionMeta: Codable, Equatable {
     var view_handle: String?
     var pid: Int?
     var kind: String?
+    var live: Bool?
+    var working: Bool?
+    var empty: Bool?
+    var origin: String?
 }
 
 /// cascade-core `UiRequest` (inlined next to `"kind":"ui_request"`).

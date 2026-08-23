@@ -65,6 +65,9 @@ pub struct MachineSession {
     pub cwd: String,
     pub created_at: String,
     pub name: Option<String>,
+    pub last_active: Option<String>,
+    pub origin: String,
+    pub messages: i64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -167,7 +170,7 @@ impl RelayRouter {
     pub fn list_machine_sessions(&self, owner: &str) -> anyhow::Result<Vec<MachineSession>> {
         let conn = Connection::open(&self.db_path)?;
         let mut stmt = conn.prepare(
-            "SELECT id, machine, cwd, created_at, name FROM machine_sessions WHERE owner = ?1 ORDER BY created_at DESC",
+            "SELECT id, machine, cwd, created_at, name, last_active, origin, messages FROM machine_sessions WHERE owner = ?1 ORDER BY created_at DESC",
         )?;
         let mapped = stmt.query_map([owner], |row| {
             Ok(MachineSession {
@@ -176,6 +179,9 @@ impl RelayRouter {
                 cwd: row.get(2)?,
                 created_at: row.get(3)?,
                 name: row.get(4)?,
+                last_active: row.get(5)?,
+                origin: row.get(6)?,
+                messages: row.get(7)?,
             })
         })?;
         let mut v = Vec::new();
@@ -317,6 +323,9 @@ impl RelayRouter {
                     cwd: cwd.to_string(),
                     created_at: Utc::now().to_rfc3339(),
                     name: None,
+                    last_active: None,
+                    origin: "spawned".into(),
+                    messages: 0,
                 };
                 let db_path = self.db_path.clone();
                 let row2 = row.clone();
@@ -534,6 +543,11 @@ impl RelayRouter {
         let machine = machine_id.to_string();
         let cwd = payload.get("cwd").and_then(|c| c.as_str()).unwrap_or("").to_string();
         let title = payload.get("title").and_then(|t| t.as_str()).map(str::to_string);
+        let last_active = payload
+            .get("updated_at")
+            .and_then(|u| u.as_str())
+            .map(str::to_string);
+        let messages = payload.get("messages").and_then(|m| m.as_i64()).unwrap_or(0);
         let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
             let conn = Connection::open(&db_path)?;
             let owner: String = conn
@@ -546,15 +560,17 @@ impl RelayRouter {
             match kind.as_str() {
                 "session_discovered" => {
                     conn.execute(
-                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at, owner, name)
-                         VALUES (?1, ?2, ?3, COALESCE((SELECT created_at FROM machine_sessions WHERE id = ?1), ?4), ?5, ?6)",
+                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at, owner, name, last_active, origin, messages)
+                         VALUES (?1, ?2, ?3, COALESCE((SELECT created_at FROM machine_sessions WHERE id = ?1), ?4), ?5, ?6, ?7, 'discovered', ?8)",
                         rusqlite::params![
                             id,
                             machine,
                             cwd,
                             Utc::now().to_rfc3339(),
                             owner,
-                            title
+                            title,
+                            last_active,
+                            messages
                         ],
                     )?;
                 }
@@ -598,7 +614,10 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
             cwd TEXT NOT NULL,
             created_at TEXT NOT NULL,
             owner TEXT NOT NULL DEFAULT '',
-            name TEXT
+            name TEXT,
+            last_active TEXT,
+            origin TEXT NOT NULL DEFAULT 'spawned',
+            messages INTEGER NOT NULL DEFAULT 0
         );
         CREATE TABLE IF NOT EXISTS machine_tokens (
             token TEXT PRIMARY KEY,
@@ -614,6 +633,9 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
         "TEXT NOT NULL DEFAULT ''",
     )?;
     crate::auth::ensure_column(conn, "machine_sessions", "name", "TEXT")?;
+    crate::auth::ensure_column(conn, "machine_sessions", "last_active", "TEXT")?;
+    crate::auth::ensure_column(conn, "machine_sessions", "origin", "TEXT NOT NULL DEFAULT 'spawned'")?;
+    crate::auth::ensure_column(conn, "machine_sessions", "messages", "INTEGER NOT NULL DEFAULT 0")?;
     Ok(())
 }
 

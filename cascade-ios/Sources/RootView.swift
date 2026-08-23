@@ -118,12 +118,20 @@ final class AppModel: ObservableObject {
                     enhanced: !isTerminal,
                     kind: isTerminal ? "terminal" : (m.kind ?? "managed"),
                     joinHandle: m.join_handle,
-                    viewHandle: m.view_handle)
+                    viewHandle: m.view_handle,
+                    live: m.live,
+                    empty: m.empty)
             }
             // Preserve user color tags across refreshes.
             let oldTags = loadTags()
             for i in next.indices { next[i].tagColor = oldTags[next[i].id] ?? .default }
-            sessions = next.sorted { $0.savedAt > $1.savedAt }
+            sessions = next
+                .filter { $0.empty != true }   // zero-content rows never render
+                .sorted { lhs, rhs in
+                    let l = lhs.live == true, r = rhs.live == true
+                    if l != r { return l }      // live first
+                    return lhs.savedAt > rhs.savedAt
+                }
             syncWatchers()
         } catch {
             // A dead/expired token drops you back on the login screen.
