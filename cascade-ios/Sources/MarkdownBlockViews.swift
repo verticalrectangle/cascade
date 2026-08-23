@@ -120,7 +120,7 @@ struct MDBlockView: View {
         }
         let color: Color = (level <= 2) ? t.accent : (proseColor ?? t.txt)
         return Text(inlineMarkdown(text, t: t, baseColor: color, defaultLanguage: language))
-            .font(.system(size: size, weight: .bold))
+            .font(.system(size: size, weight: .bold, design: .serif))
             .selectableText(selectable)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)

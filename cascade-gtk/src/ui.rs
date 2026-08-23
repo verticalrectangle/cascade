@@ -148,6 +148,9 @@ fn tag_specs(theme: &str) -> Vec<(&'static str, TagSpec)> {
     push("md-link", TagSpec { fg: Some(p.iris), underline: true, ..Default::default() });
     push("md-strike", TagSpec { strikethrough: true, ..Default::default() });
     push("md-highlight", TagSpec { bg: Some(p.highlight_bg), ..Default::default() });
+    push("md-table", TagSpec {
+        fg: Some(p.text), font: Some(MONO), size_pt: 12.0, ..Default::default()
+    });
     push("code", TagSpec {
         fg: Some(p.foam), bg: Some(p.code_bg), font: Some(MONO), size_pt: 12.5,
         ..Default::default()
@@ -203,6 +206,10 @@ fn apply_tag(table: &TextTagTable, name: &str, spec: &TagSpec) {
         pango::Underline::None
     });
     tag.set_strikethrough(spec.strikethrough);
+    // Bold/heading/checked-marker colors must win over muted md-list-marker.
+    if name == "md-bold" || name.starts_with("md-h") {
+        tag.set_priority(1);
+    }
 }
 
 /// Create (or restyle) all transcript tags on a buffer for `theme`.
@@ -1331,7 +1338,12 @@ fn insert_named(buf: &TextBuffer, text: &str, tags: &[&str]) {
 
 fn insert_run(buf: &TextBuffer, run: &markdown::Run, extra: &[&str]) {
     let start_off = buf.end_iter().offset();
-    let mut names: Vec<&str> = Vec::with_capacity(extra.len() + 2);
+    // "assistant" is first in the tag table (lowest priority): fontless
+    // modifiers inherit serif 13.5, while md-inline-code's mono 12 still wins.
+    let mut names: Vec<&str> = Vec::with_capacity(extra.len() + 3);
+    if run.tag != "assistant" {
+        names.push("assistant");
+    }
     names.push(run.tag);
     names.extend_from_slice(extra);
     if run.link.is_some() && run.tag != "md-link" {
@@ -1673,6 +1685,8 @@ fn attach_copy_menu(view: &TextView, label: &str) {
 
 /// Render one assistant markdown body into `parent` (durable or live box).
 fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
+    if body.contains("Wall time") {
+    }
     for block in markdown::parse_blocks(body) {
         match block {
             Block::Prose(runs) => {
@@ -1734,12 +1748,12 @@ fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
                 tv.set_wrap_mode(gtk4::WrapMode::None);
                 let buf = tv.buffer();
                 let (head, sep, body_lines) = format_table_lines(&header, &aligns, &rows);
-                insert_named(&buf, &head, &["md-bold"]);
-                insert_named(&buf, "\n", &["assistant"]);
-                insert_named(&buf, &sep, &["assistant"]);
+                insert_named(&buf, &head, &["md-table", "md-bold"]);
+                insert_named(&buf, "\n", &["md-table"]);
+                insert_named(&buf, &sep, &["md-table"]);
                 for line in body_lines {
-                    insert_named(&buf, "\n", &["assistant"]);
-                    insert_named(&buf, &line, &["assistant"]);
+                    insert_named(&buf, "\n", &["md-table"]);
+                    insert_named(&buf, &line, &["md-table"]);
                 }
                 attach_copy_menu(&tv, "Copy text");
                 scroll.set_child(Some(&tv));
@@ -2523,23 +2537,197 @@ fn parse_agent_message(v: &serde_json::Value) -> Option<(String, String)> {
         .and_then(|r| r.as_str())
         .unwrap_or("assistant")
         .to_string();
-    let text = if let Some(s) = v.get("content").and_then(|c| c.as_str()) {
+    if role == "toolResult" {
+    }
+    Some((role, message_plain_text(v)))
+}
+
+fn message_plain_text(v: &serde_json::Value) -> String {
+    match v.get("content") {
+        Some(c) => flatten_content_value(c),
+        None => v
+            .get("text")
+            .and_then(|t| t.as_str())
+            .unwrap_or("")
+            .to_string(),
+    }
+}
+
+fn flatten_content_value(c: &serde_json::Value) -> String {
+    if let Some(s) = c.as_str() {
         s.to_string()
-    } else if let Some(arr) = v.get("content").and_then(|c| c.as_array()) {
+    } else if let Some(arr) = c.as_array() {
         arr.iter()
-            .filter_map(|p| {
-                p.as_str()
-                    .map(|s| s.to_string())
-                    .or_else(|| p.get("text").and_then(|t| t.as_str()).map(|s| s.to_string()))
-            })
+            .filter_map(part_plain_text)
             .collect::<Vec<_>>()
             .join("")
-    } else if let Some(s) = v.get("text").and_then(|t| t.as_str()) {
+    } else if let Some(s) = c.get("text").and_then(|t| t.as_str()) {
         s.to_string()
     } else {
         String::new()
+    }
+}
+
+fn part_plain_text(p: &serde_json::Value) -> Option<String> {
+    p.as_str().map(|s| s.to_string()).or_else(|| {
+        p.get("text")
+            .and_then(|t| t.as_str())
+            .map(|s| s.to_string())
+    })
+}
+
+fn content_display(c: &serde_json::Value) -> String {
+    let flat = flatten_content_value(c);
+    if !flat.is_empty() {
+        return flat;
+    }
+    match c {
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    }
+}
+
+fn str_field<'a>(v: &'a serde_json::Value, names: &[&str]) -> Option<&'a str> {
+    names.iter().find_map(|n| v.get(*n).and_then(|x| x.as_str()))
+}
+
+fn json_pretty(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::String(s) => s.clone(),
+        other => serde_json::to_string_pretty(other).unwrap_or_default(),
+    }
+}
+
+fn thinking_text(part: &serde_json::Value) -> Option<String> {
+    let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    if !matches!(ty, "thinking" | "redactedThinking" | "reasoning") {
+        return None;
+    }
+    for key in ["thinking", "text", "data", "reasoning"] {
+        if let Some(s) = part.get(key).and_then(|t| t.as_str()).filter(|s| !s.is_empty()) {
+            return Some(s.to_string());
+        }
+    }
+    part.get("content")
+        .map(flatten_content_value)
+        .filter(|s| !s.is_empty())
+}
+
+fn fill_tool_result(
+    body: &TextView,
+    container: &GtkBox,
+    tool_name: &str,
+    text: &str,
+    is_error: bool,
+) {
+    let buf = body.buffer();
+    buf.set_text("");
+    if is_error {
+        insert_tagged(&buf, &format!("{tool_name} failed\n"), "md-bold");
+        container.add_css_class("advisory-error");
+    }
+    insert_tagged(&buf, text, "tool");
+}
+
+fn append_history_tool_call(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, part: &serde_json::Value) {
+    let name = str_field(part, &["name", "toolName"]).unwrap_or("tool");
+    let id = str_field(part, &["id", "toolCallId"]).unwrap_or("");
+    let meta = str_field(part, &["intent"])
+        .map(|i| format!("· {i}"))
+        .unwrap_or_default();
+    let args_text = part
+        .get("arguments")
+        .or_else(|| part.get("args"))
+        .map(json_pretty)
+        .unwrap_or_default();
+    let (card, body, _chev) =
+        make_tool_card(ui, "tool-tool-use", &name.to_uppercase(), &meta, "tool");
+    insert_tagged(&body.buffer(), &args_text, "tool");
+    parent.append(&card);
+    if !id.is_empty() {
+        ui.borrow_mut().stream.tools.insert(
+            id.to_string(),
+            ToolCard {
+                body,
+                container: card,
+            },
+        );
+    }
+}
+
+fn append_history_thinking(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, text: &str) {
+    let (card, body, chevron) =
+        make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking");
+    insert_tagged(&body.buffer(), text, "thinking");
+    body.set_visible(false);
+    chevron.set_text("▸");
+    card.add_css_class("collapsed");
+    parent.append(&card);
+}
+
+fn apply_history_tool_result(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_json::Value) {
+    let call_id = str_field(msg, &["toolCallId", "tool_call_id"]).unwrap_or("");
+    let tool_name = str_field(msg, &["toolName", "tool_name"]).unwrap_or("tool");
+    let is_error = msg
+        .get("isError")
+        .or_else(|| msg.get("is_error"))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let body_text = msg.get("content").map(content_display).unwrap_or_default();
+
+    let existing = if !call_id.is_empty() {
+        ui.borrow()
+            .stream
+            .tools
+            .get(call_id)
+            .map(|c| (c.body.clone(), c.container.clone()))
+    } else {
+        None
     };
-    Some((role, text))
+
+    if let Some((body, container)) = existing {
+        if body_text.is_empty() && !is_error {
+            return;
+        }
+        fill_tool_result(&body, &container, tool_name, &body_text, is_error);
+        return;
+    }
+
+    if body_text.is_empty() && !is_error {
+        return;
+    }
+
+    let (card, body, _chev) =
+        make_tool_card(ui, "tool-tool-use", &tool_name.to_uppercase(), "", "tool");
+    fill_tool_result(&body, &card, tool_name, &body_text, is_error);
+    parent.append(&card);
+    if !call_id.is_empty() {
+        ui.borrow_mut().stream.tools.insert(
+            call_id.to_string(),
+            ToolCard {
+                body,
+                container: card,
+            },
+        );
+    }
+}
+
+fn render_history_part(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, part: &serde_json::Value) {
+    let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    match ty {
+        "toolCall" | "tool_call" => append_history_tool_call(ui, parent, part),
+        "thinking" | "redactedThinking" | "reasoning" => {
+            if let Some(text) = thinking_text(part) {
+                append_history_thinking(ui, parent, &text);
+            }
+        }
+        _ => {
+            if let Some(text) = part_plain_text(part).filter(|s| !s.is_empty()) {
+                render_markdown_into(ui, parent, &text);
+            }
+        }
+    }
 }
 
 fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
@@ -2581,6 +2769,7 @@ fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
         u.history_server_more = snap.has_more;
         u.history_has_content = !msgs.is_empty() || !u.history.is_empty();
         u.follow.set(true);
+        u.stream.tools.clear();
     }
     for msg in msgs {
         render_history_message(ui, &durable, &msg);
@@ -2597,15 +2786,30 @@ fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
 
 /// One message into an explicit parent — shared by tail render and prepend.
 fn render_history_message(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_json::Value) {
-    if let Some((role, text)) = parse_agent_message(msg) {
-        if text.is_empty() {
-            return;
-        }
-        if role == "user" || role == "human" {
+    let role = msg
+        .get("role")
+        .and_then(|r| r.as_str())
+        .unwrap_or("assistant");
+    if role == "user" || role == "human" {
+        let text = message_plain_text(msg);
+        if !text.is_empty() {
             user_bubble_into(ui, parent, &text, &[], true);
-        } else {
-            render_markdown_into(ui, parent, &text);
         }
+        return;
+    }
+    if role == "toolResult" {
+        apply_history_tool_result(ui, parent, msg);
+        return;
+    }
+    if let Some(arr) = msg.get("content").and_then(|c| c.as_array()) {
+        for part in arr {
+            render_history_part(ui, parent, part);
+        }
+        return;
+    }
+    let text = message_plain_text(msg);
+    if !text.is_empty() {
+        render_markdown_into(ui, parent, &text);
     }
 }
 
@@ -2832,7 +3036,18 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             }
         }
         SessionEvent::MessageEnd { message } => {
-            if let Some((role, text)) = parse_agent_message(&message) {
+            let role = message
+                .get("role")
+                .and_then(|r| r.as_str())
+                .unwrap_or("assistant")
+                .to_string();
+            if role == "toolResult" {
+                // Discovered sessions stream tool results ONLY as MessageEnd
+                // lines — route them into the card path or they spill into
+                // the transcript as bare prose (the "Wall time" soup).
+                let live = ui.borrow().live_box.clone();
+                apply_history_tool_result(ui, &live, &message);
+            } else if let Some((_, text)) = parse_agent_message(&message) {
                 if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
                     if role == "user" || role == "human" {
                         let dup = {
@@ -2849,6 +3064,37 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     } else {
                         let live = ui.borrow().live_box.clone();
                         render_markdown_into(ui, &live, &text);
+                    }
+                }
+                // Cards for toolCall/thinking parts in this message — but
+                // only when no matching card exists yet (managed sessions
+                // already built them from ToolStart events).
+                if role != "user" && role != "human" {
+                    if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
+                        for part in arr {
+                            let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match ty {
+                                "toolCall" => {
+                                    let id = part
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !id.is_empty()
+                                        && !ui.borrow().stream.tools.contains_key(id)
+                                    {
+                                        let live = ui.borrow().live_box.clone();
+                                        append_history_tool_call(ui, &live, part);
+                                    }
+                                }
+                                "thinking" | "redactedThinking" | "reasoning" => {
+                                    if let Some(text) = thinking_text(part) {
+                                        let live = ui.borrow().live_box.clone();
+                                        append_history_thinking(ui, &live, &text);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
                     }
                 }
             }
