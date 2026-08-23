@@ -34,6 +34,7 @@ struct EditorView: View {
     @FocusState private var composerFocused: Bool
     @State private var stickToBottom = true
     @State private var didInitialScroll = false
+    @State private var didContentScroll = false
     @State private var scrollVisibleHeight: CGFloat = 0
     @EnvironmentObject var app: AppModel
 
@@ -229,9 +230,19 @@ struct EditorView: View {
                 // If it's within (or just below) the visible area, we're at the bottom.
                 stickToBottom = bottomY <= scrollVisibleHeight + 50
             }
-            .onChange(of: vm.turns) { _, _ in
+            .onChange(of: vm.turns) { _, turns in
                 if didInitialScroll && stickToBottom {
                     proxy.scrollTo("bottom", anchor: .bottom)
+                } else if !didContentScroll && !turns.isEmpty {
+                    // The phase-driven initial scroll fires before the
+                    // snapshot lays out — the list is still short, so the
+                    // scroll is a no-op and big transcripts open stuck at
+                    // the top of the tail. Pin once real content exists.
+                    didContentScroll = true
+                    Task { @MainActor in
+                        try? await Task.sleep(nanoseconds: 150_000_000)
+                        proxy.scrollTo("bottom", anchor: .bottom)
+                    }
                 }
             }
             .onChange(of: vm.live.phase) { _, phase in
