@@ -237,11 +237,14 @@ struct EditorView: View {
                     // The phase-driven initial scroll fires before the
                     // snapshot lays out — the list is still short, so the
                     // scroll is a no-op and big transcripts open stuck at
-                    // the top of the tail. Pin once real content exists.
+                    // the top of the tail. Pin repeatedly while the tail
+                    // settles; the last one lands stickToBottom for good.
                     didContentScroll = true
                     Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 150_000_000)
-                        proxy.scrollTo("bottom", anchor: .bottom)
+                        for delay in [100_000_000, 400_000_000, 1_000_000_000] as [UInt64] {
+                            try? await Task.sleep(nanoseconds: delay)
+                            proxy.scrollTo("bottom", anchor: .bottom)
+                        }
                     }
                 }
             }
