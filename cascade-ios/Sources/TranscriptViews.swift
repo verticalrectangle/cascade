@@ -569,8 +569,11 @@ func inlineMarkdown(_ s: String, t: Theme, baseColor: Color? = nil, defaultLangu
     }
 
     // 3 — inline `code` spans: background, optional syntax highlight, and monospace intent.
+    // Pass 2 deleted ==…== markers, so `body` is stale — enumerate against
+    // the current length or NSRLEArray walks off the end and SIGSEGVs.
+    let bodyAfterHighlights = NSRange(location: 0, length: mut.length)
     var codeRanges: [NSRange] = []
-    mut.enumerateAttribute(.inlinePresentationIntent, in: body, options: []) { value, range, _ in
+    mut.enumerateAttribute(.inlinePresentationIntent, in: bodyAfterHighlights, options: []) { value, range, _ in
         guard let intent = value as? InlinePresentationIntent, intent.contains(.code) else { return }
         codeRanges.append(range)
     }
