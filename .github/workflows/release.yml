@@ -23,6 +23,8 @@ jobs:
           cp target/release/cascade-gtk target/release/cascaded out/cascade/
           cp dist/install.sh out/cascade/
           cp dist/cascade.desktop dist/cascade.png dist/cascaded-desktop.service out/cascade/
+          mkdir -p out/cascade/cascade-omp-plugin
+          cp cascade-omp-plugin/index.ts cascade-omp-plugin/package.json out/cascade/cascade-omp-plugin/
           tar -czf cascade-linux-x86_64.tar.gz -C out cascade
       - name: Upload release assets
         uses: softprops/action-gh-release@v2
