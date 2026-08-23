@@ -7,7 +7,7 @@ use axum::extract::ws::{Message, WebSocket};
 use axum::extract::{State, WebSocketUpgrade};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
-use cascade_core::MachineInfo;
+use cascade_core::{MachineInfo, SessionEvent, SessionSnapshot};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::Connection;
@@ -92,6 +92,13 @@ pub struct RelayRouter {
     pending: Arc<Mutex<HashMap<String, oneshot::Sender<serde_json::Value>>>>,
     attached: Arc<Mutex<HashMap<String, Vec<mpsc::UnboundedSender<Message>>>>>,
     bandwidth: Arc<Mutex<crate::bandwidth::BandwidthLedger>>,
+    rolling: Arc<Mutex<HashMap<String, RollingShare>>>,
+}
+
+#[derive(Clone, Default)]
+struct RollingShare {
+    snapshot: SessionSnapshot,
+    title: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -117,6 +124,7 @@ impl RelayRouter {
             pending: Arc::new(Mutex::new(HashMap::new())),
             attached: Arc::new(Mutex::new(HashMap::new())),
             bandwidth: Arc::new(Mutex::new(crate::bandwidth::BandwidthLedger::from_env())),
+            rolling: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -336,6 +344,31 @@ impl RelayRouter {
     /// bare SessionEvent JSON — the envelope wrapper is machine-relay routing
     /// only, so unwrap before sending.
     async fn fan_out(&self, session_id: &str, payload: serde_json::Value) {
+        if let Ok(ev) = serde_json::from_value::<SessionEvent>(payload.clone()) {
+            let archive = {
+                let mut rolling = self.rolling.lock().await;
+                let (snap, title, exiting) = {
+                    let entry = rolling.entry(session_id.to_string()).or_default();
+                    crate::routes::apply_share_event(&mut entry.snapshot, &mut entry.title, &ev);
+                    let exiting = matches!(ev, SessionEvent::ProcessExited { .. });
+                    (entry.snapshot.clone(), entry.title.clone(), exiting)
+                };
+                if exiting {
+                    rolling.remove(session_id);
+                    Some((snap, title))
+                } else {
+                    None
+                }
+            };
+            if let Some((snap, title)) = archive {
+                let db = self.db_path.clone();
+                let sid = session_id.to_string();
+                tokio::task::spawn_blocking(move || {
+                    let _ =
+                        crate::routes::persist_share_archive(&db, &sid, &snap, title.as_deref());
+                });
+            }
+        }
         let Some(text) = serde_json::to_string(&payload).ok() else {
             return;
         };
@@ -350,7 +383,9 @@ impl RelayRouter {
                         "level": "warning",
                         "message": "relay bandwidth cap reached",
                     });
-                    let Some(ntext) = serde_json::to_string(&notice).ok() else { return };
+                    let Some(ntext) = serde_json::to_string(&notice).ok() else {
+                        return;
+                    };
                     let nmsg = Message::Text(ntext.into());
                     let mut map = self.attached.lock().await;
                     if let Some(subs) = map.get_mut(session_id) {

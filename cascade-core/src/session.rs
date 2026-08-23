@@ -149,6 +149,28 @@ pub struct SessionSnapshot {
     pub pending_ui: Vec<UiRequest>,
 }
 
+impl SessionSnapshot {
+    /// Fold a live event into the snapshot a late joiner would receive.
+    pub fn apply(&mut self, ev: &SessionEvent) {
+        match ev {
+            SessionEvent::TurnStarted => self.streaming = true,
+            SessionEvent::AgentEnd => self.streaming = false,
+            SessionEvent::MessageEnd { message } => self.messages.push(message.clone()),
+            SessionEvent::TodoChanged { phases } => self.todos = phases.clone(),
+            SessionEvent::UiRequest(req) => {
+                self.pending_ui.retain(|r| r.id != req.id);
+                self.pending_ui.push(req.clone());
+            }
+            SessionEvent::UiRequestCancelled { target_id } => {
+                self.pending_ui.retain(|r| r.id != *target_id);
+            }
+            SessionEvent::Snapshot(s) => *self = s.clone(),
+            SessionEvent::ProcessExited { .. } => self.streaming = false,
+            _ => {}
+        }
+    }
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct RpcSessionState {
@@ -491,25 +513,11 @@ impl OmpSession {
     }
 
     async fn apply_event(&self, ev: &SessionEvent) {
-        let mut snap = self.inner.snapshot.lock().await;
-        match ev {
-            SessionEvent::TurnStarted => snap.streaming = true,
-            SessionEvent::AgentEnd => snap.streaming = false,
-            SessionEvent::MessageEnd { message } => snap.messages.push(message.clone()),
-            SessionEvent::TodoChanged { phases } => snap.todos = phases.clone(),
-            SessionEvent::UiRequest(req) => {
-                snap.pending_ui.retain(|r| r.id != req.id);
-                snap.pending_ui.push(req.clone());
-            }
-            SessionEvent::UiRequestCancelled { target_id } => {
-                snap.pending_ui.retain(|r| r.id != *target_id);
-            }
-            SessionEvent::SessionInfo { session_id, .. } => {
-                drop(snap);
-                *self.inner.omp_session_id.lock().await = Some(session_id.clone());
-            }
-            _ => {}
+        if let SessionEvent::SessionInfo { session_id, .. } = ev {
+            *self.inner.omp_session_id.lock().await = Some(session_id.clone());
+            return;
         }
+        self.inner.snapshot.lock().await.apply(ev);
     }
 }
 

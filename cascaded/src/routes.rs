@@ -1,16 +1,21 @@
+use std::collections::HashMap;
+use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
+use std::sync::{Mutex, OnceLock};
+use std::time::{Duration, Instant};
 
 use axum::{
     extract::{
+        rejection::JsonRejection,
         ws::{Message, WebSocket, WebSocketUpgrade},
-        Path, State,
+        ConnectInfo, Path, Query, State,
     },
-    http::{HeaderMap, StatusCode},
-    response::IntoResponse,
+    http::{header, HeaderMap, HeaderValue, StatusCode},
+    response::{IntoResponse, Response},
     Json,
 };
-use cascade_core::{CloudCommand, SessionManager, SpawnOptions};
-use chrono::Utc;
+use cascade_core::{CloudCommand, SessionEvent, SessionManager, SessionSnapshot, SpawnOptions};
+use chrono::{DateTime, Utc};
 use futures_util::{SinkExt, StreamExt};
 use rusqlite::{Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
@@ -18,6 +23,29 @@ use uuid::Uuid;
 
 use crate::auth::AuthUser;
 use crate::{json_err, AppState};
+
+const PUBLIC_MAX_PER_MINUTE: usize = 5;
+const PUBLIC_WINDOW: Duration = Duration::from_secs(60);
+const DEFAULT_SHARE_HOURS: f64 = 24.0;
+const VIEWER_CSP: &str = "default-src 'none'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; connect-src 'self' ws: wss:; img-src 'self' data:; frame-ancestors 'none'";
+const VIEWER_FALLBACK: &str = r#"<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>__TITLE__</title>
+</head>
+<body>
+<h1>__TITLE__</h1>
+<p>session __SESSION_ID__ expires __EXPIRES__</p>
+<script>
+window.CASCADE_SHARE = { token: "__TOKEN__", sessionId: "__SESSION_ID__", expires: "__EXPIRES__" };
+</script>
+</body>
+</html>
+"#;
+
+static PUBLIC_ATTEMPTS: OnceLock<Mutex<HashMap<IpAddr, Vec<Instant>>>> = OnceLock::new();
 
 #[derive(Debug, Serialize)]
 pub struct CreateSessionResponse {
@@ -40,6 +68,14 @@ pub struct TokenResponse {
 pub struct ShareResponse {
     pub token: String,
     pub url: String,
+    pub expires_at: Option<String>,
+    pub expires_in_hours: serde_json::Value,
+}
+
+#[derive(Debug, Deserialize, Default)]
+pub struct CreateShareRequest {
+    #[serde(default)]
+    pub expires_in_hours: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,9 +84,34 @@ pub struct ShareLookup {
     pub read_only: bool,
 }
 
+#[derive(Debug, Deserialize, Default)]
+pub struct StreamQuery {
+    share: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct ArchivedShare {
+    pub snapshot: SessionSnapshot,
+    pub title: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct ShareRow {
+    token: String,
+    session_id: String,
+    expires_at: Option<String>,
+    final_snapshot: Option<String>,
+}
+
 enum StreamAccess {
     Owner,
     ReadOnly,
+}
+
+enum ShareMatch {
+    Ok,
+    Expired,
+    No,
 }
 
 pub fn init_share_tables(conn: &Connection) -> anyhow::Result<()> {
@@ -58,10 +119,32 @@ pub fn init_share_tables(conn: &Connection) -> anyhow::Result<()> {
         "CREATE TABLE IF NOT EXISTS shares (
             token TEXT PRIMARY KEY,
             session_id TEXT NOT NULL,
-            created_at TEXT NOT NULL
+            created_at TEXT NOT NULL,
+            expires_at TEXT,
+            final_snapshot TEXT
         );
         CREATE INDEX IF NOT EXISTS shares_session ON shares(session_id);",
     )?;
+    let needs_expiry_backfill = !crate::auth::has_column(conn, "shares", "expires_at")?;
+    crate::auth::ensure_column(conn, "shares", "expires_at", "TEXT")?;
+    crate::auth::ensure_column(conn, "shares", "final_snapshot", "TEXT")?;
+    if needs_expiry_backfill {
+        let rows: Vec<(String, String)> = {
+            let mut stmt = conn.prepare("SELECT token, created_at FROM shares")?;
+            let mapped =
+                stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?;
+            mapped.collect::<rusqlite::Result<Vec<_>>>()?
+        };
+        for (token, created) in rows {
+            let exp = DateTime::parse_from_rfc3339(&created)
+                .map(|d| d.with_timezone(&Utc) + chrono::Duration::hours(24))
+                .unwrap_or_else(|_| Utc::now() + chrono::Duration::hours(24));
+            conn.execute(
+                "UPDATE shares SET expires_at = ?1 WHERE token = ?2",
+                rusqlite::params![exp.to_rfc3339(), token],
+            )?;
+        }
+    }
     Ok(())
 }
 
@@ -296,19 +379,33 @@ pub async fn create_share(
     user: AuthUser,
     Path(id): Path<String>,
     headers: HeaderMap,
+    body: Result<Json<CreateShareRequest>, JsonRejection>,
 ) -> Result<Json<ShareResponse>, (StatusCode, Json<serde_json::Value>)> {
     if !owns_session(&state, &user.uid, &id).await {
         return Err(json_err(StatusCode::NOT_FOUND, "session not found"));
     }
+    let parsed = match body {
+        Ok(Json(v)) => v,
+        Err(JsonRejection::MissingJsonContentType(_)) => CreateShareRequest::default(),
+        Err(_) => return Err(json_err(StatusCode::BAD_REQUEST, "invalid json")),
+    };
+    let hours = parse_expires_in_hours(&parsed.expires_in_hours)
+        .map_err(|e| json_err(StatusCode::BAD_REQUEST, e))?;
+    let expires_at = expires_at_from_hours(hours, Utc::now());
+    let hours_json = hours_json(hours);
     let db = state.db_path.clone();
     let session_id = id.clone();
-    let token = tokio::task::spawn_blocking(move || mint_share(&db, &session_id))
-        .await
-        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+    let expires_store = expires_at.clone();
+    let token =
+        tokio::task::spawn_blocking(move || mint_share(&db, &session_id, expires_store.as_deref()))
+            .await
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
     Ok(Json(ShareResponse {
         url: share_url(&headers, &token),
         token,
+        expires_at,
+        expires_in_hours: hours_json,
     }))
 }
 
@@ -323,16 +420,18 @@ pub async fn get_share(
     }
     let db = state.db_path.clone();
     let session_id = id.clone();
-    let token = tokio::task::spawn_blocking(move || share_token_for_session(&db, &session_id))
+    let row = tokio::task::spawn_blocking(move || lookup_share_by_session(&db, &session_id))
         .await
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let Some(token) = token else {
+    let Some(row) = row else {
         return Err(json_err(StatusCode::NOT_FOUND, "not shared"));
     };
     Ok(Json(ShareResponse {
-        url: share_url(&headers, &token),
-        token,
+        url: share_url(&headers, &row.token),
+        token: row.token,
+        expires_in_hours: remaining_hours_json(row.expires_at.as_deref(), Utc::now()),
+        expires_at: row.expires_at,
     }))
 }
 
@@ -340,20 +439,56 @@ pub async fn get_share(
 pub async fn resolve_share(
     State(state): State<AppState>,
     Path(token): Path<String>,
-) -> Result<Json<ShareLookup>, (StatusCode, Json<serde_json::Value>)> {
+    headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
+) -> Response {
+    let html = prefers_html(accept_header(&headers));
+    if !allow_public(public_ip(&headers, addr)) {
+        return if html {
+            (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
+        } else {
+            json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
+        };
+    }
+
     let db = state.db_path.clone();
     let tok = token.clone();
-    let session_id = tokio::task::spawn_blocking(move || share_session_for_token(&db, &tok))
-        .await
-        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
-        .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    let Some(session_id) = session_id else {
-        return Err(json_err(StatusCode::NOT_FOUND, "unknown view link"));
+    let row = match tokio::task::spawn_blocking(move || lookup_share_by_token(&db, &tok)).await {
+        Ok(Ok(row)) => row,
+        Ok(Err(e)) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response();
+        }
+        Err(e) => {
+            return json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()).into_response();
+        }
     };
-    Ok(Json(ShareLookup {
-        session_id,
-        read_only: true,
-    }))
+    let Some(row) = row else {
+        return if html {
+            viewer_html(StatusCode::NOT_FOUND, error_page("Share link not found"))
+        } else {
+            json_err(StatusCode::NOT_FOUND, "unknown view link").into_response()
+        };
+    };
+    if share_is_expired(row.expires_at.as_deref(), Utc::now()) {
+        return if html {
+            viewer_html(StatusCode::GONE, error_page("Share link expired"))
+        } else {
+            json_err(StatusCode::GONE, "share link expired").into_response()
+        };
+    }
+
+    if html {
+        let title = viewer_title(&state, &row.session_id, row.final_snapshot.as_deref()).await;
+        let expires = expires_placeholder(row.expires_at.as_deref());
+        let body = render_viewer(&token, &row.session_id, &title, &expires);
+        viewer_html(StatusCode::OK, body)
+    } else {
+        Json(ShareLookup {
+            session_id: row.session_id,
+            read_only: true,
+        })
+        .into_response()
+    }
 }
 
 pub async fn delete_share(
@@ -377,33 +512,62 @@ pub async fn session_stream(
     ws: WebSocketUpgrade,
     State(state): State<AppState>,
     Path(id): Path<String>,
+    Query(query): Query<StreamQuery>,
     headers: HeaderMap,
+    ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Result<impl IntoResponse, (StatusCode, Json<serde_json::Value>)> {
-    let token = crate::auth::bearer_from_headers(&headers)
-        .ok_or_else(|| json_err(StatusCode::UNAUTHORIZED, "missing authorization"))?;
-    let access = authorize_stream(&state, &id, token).await?;
+    let header_tok = crate::auth::bearer_from_headers(&headers).map(str::to_string);
+    let query_tok = query.share.filter(|s| !s.is_empty());
+    let token = match (header_tok.as_deref(), query_tok.as_deref()) {
+        (Some(h), _) => h.to_string(),
+        (None, Some(s)) => s.to_string(),
+        (None, None) => {
+            return Err(json_err(StatusCode::UNAUTHORIZED, "missing authorization"));
+        }
+    };
+
+    let jwt_ok = crate::auth::verify_token(&state.jwt_secret, &token).is_ok();
+    if !jwt_ok && !allow_public(public_ip(&headers, addr)) {
+        return Err(json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests"));
+    }
+
+    let access = authorize_stream(&state, &id, &token).await?;
     let read_only = match access {
         StreamAccess::Owner => false,
         StreamAccess::ReadOnly => true,
     };
 
     if let Some(session) = state.sessions.get(&id).await {
+        let db_path = state.db_path.clone();
+        let manager = state.sessions.clone();
         return Ok(ws.on_upgrade(move |socket| {
-            handle_stream(socket, session, state.sessions.clone(), read_only)
+            handle_stream(socket, session, manager, read_only, db_path)
         }));
     }
-    // Not cloud-local: a desktop-hosted session behind the machine relay.
     if let Some(machine) = state.relay.machine_of(&id) {
-        if !state.relay.machine_online(&machine).await {
+        if state.relay.machine_online(&machine).await {
+            let router = state.relay.clone();
+            return Ok(ws.on_upgrade(move |socket| async move {
+                router.proxy_stream(machine, id, socket, read_only).await;
+            }));
+        }
+        if !read_only {
             return Err(json_err(
                 StatusCode::SERVICE_UNAVAILABLE,
                 &format!("machine {machine} is offline"),
             ));
         }
-        let router = state.relay.clone();
-        return Ok(ws.on_upgrade(move |socket| async move {
-            router.proxy_stream(machine, id, socket, read_only).await;
-        }));
+    }
+    if read_only {
+        let db = state.db_path.clone();
+        let sid = id.clone();
+        let archive = tokio::task::spawn_blocking(move || load_share_archive(&db, &sid))
+            .await
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
+            .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
+        if let Some(archive) = archive {
+            return Ok(ws.on_upgrade(move |socket| handle_archived_stream(socket, archive)));
+        }
     }
     Err(json_err(StatusCode::NOT_FOUND, "session not found"))
 }
@@ -435,14 +599,14 @@ async fn authorize_stream(
     let db = state.db_path.clone();
     let tok = token.to_string();
     let sid = session_id.to_string();
-    let found = tokio::task::spawn_blocking(move || share_matches(&db, &tok, &sid))
+    let status = tokio::task::spawn_blocking(move || share_status(&db, &tok, &sid))
         .await
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?
         .map_err(|e| json_err(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()))?;
-    if found {
-        Ok(StreamAccess::ReadOnly)
-    } else {
-        Err(json_err(StatusCode::UNAUTHORIZED, "invalid token"))
+    match status {
+        ShareMatch::Ok => Ok(StreamAccess::ReadOnly),
+        ShareMatch::Expired => Err(json_err(StatusCode::NOT_FOUND, "share link expired")),
+        ShareMatch::No => Err(json_err(StatusCode::UNAUTHORIZED, "invalid token")),
     }
 }
 
@@ -469,13 +633,17 @@ async fn owns_session(state: &AppState, uid: &str, session_id: &str) -> bool {
     }
 }
 
-fn mint_share(db: &std::path::Path, session_id: &str) -> anyhow::Result<String> {
+fn mint_share(
+    db: &std::path::Path,
+    session_id: &str,
+    expires_at: Option<&str>,
+) -> anyhow::Result<String> {
     let conn = Connection::open(db)?;
     conn.execute("DELETE FROM shares WHERE session_id = ?1", [session_id])?;
     let token = Uuid::new_v4().to_string();
     conn.execute(
-        "INSERT INTO shares (token, session_id, created_at) VALUES (?1, ?2, ?3)",
-        rusqlite::params![token, session_id, Utc::now().to_rfc3339()],
+        "INSERT INTO shares (token, session_id, created_at, expires_at) VALUES (?1, ?2, ?3, ?4)",
+        rusqlite::params![token, session_id, Utc::now().to_rfc3339(), expires_at],
     )?;
     Ok(token)
 }
@@ -486,41 +654,125 @@ fn revoke_shares(db: &std::path::Path, session_id: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn share_status(db: &std::path::Path, token: &str, session_id: &str) -> anyhow::Result<ShareMatch> {
+    match lookup_share_by_token(db, token)? {
+        None => Ok(ShareMatch::No),
+        Some(row) if row.session_id != session_id => Ok(ShareMatch::No),
+        Some(row) if share_is_expired(row.expires_at.as_deref(), Utc::now()) => {
+            Ok(ShareMatch::Expired)
+        }
+        Some(_) => Ok(ShareMatch::Ok),
+    }
+}
+
+#[cfg(test)]
 fn share_matches(db: &std::path::Path, token: &str, session_id: &str) -> anyhow::Result<bool> {
-    Ok(share_session_for_token(db, token)?.as_deref() == Some(session_id))
+    Ok(matches!(
+        share_status(db, token, session_id)?,
+        ShareMatch::Ok
+    ))
 }
 
+#[cfg(test)]
 fn share_session_for_token(db: &std::path::Path, token: &str) -> anyhow::Result<Option<String>> {
-    let conn = Connection::open(db)?;
-    let found: Option<String> = conn
-        .query_row(
-            "SELECT session_id FROM shares WHERE token = ?1",
-            [token],
-            |r| r.get(0),
-        )
-        .optional()?;
-    Ok(found)
+    Ok(lookup_share_by_token(db, token)?.map(|r| r.session_id))
 }
 
+#[cfg(test)]
 fn share_token_for_session(
     db: &std::path::Path,
     session_id: &str,
 ) -> anyhow::Result<Option<String>> {
+    Ok(lookup_share_by_session(db, session_id)?.map(|r| r.token))
+}
+
+fn lookup_share_by_token(db: &std::path::Path, token: &str) -> anyhow::Result<Option<ShareRow>> {
     let conn = Connection::open(db)?;
-    let found: Option<String> = conn
+    let found = conn
         .query_row(
-            "SELECT token FROM shares WHERE session_id = ?1",
-            [session_id],
-            |r| r.get(0),
+            "SELECT token, session_id, expires_at, final_snapshot FROM shares WHERE token = ?1",
+            [token],
+            row_to_share,
         )
         .optional()?;
     Ok(found)
+}
+
+fn lookup_share_by_session(
+    db: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<Option<ShareRow>> {
+    let conn = Connection::open(db)?;
+    let found = conn
+        .query_row(
+            "SELECT token, session_id, expires_at, final_snapshot FROM shares WHERE session_id = ?1",
+            [session_id],
+            row_to_share,
+        )
+        .optional()?;
+    Ok(found)
+}
+
+fn row_to_share(r: &rusqlite::Row<'_>) -> rusqlite::Result<ShareRow> {
+    Ok(ShareRow {
+        token: r.get(0)?,
+        session_id: r.get(1)?,
+        expires_at: r.get(2)?,
+        final_snapshot: r.get(3)?,
+    })
+}
+
+fn load_share_archive(
+    db: &std::path::Path,
+    session_id: &str,
+) -> anyhow::Result<Option<ArchivedShare>> {
+    let Some(row) = lookup_share_by_session(db, session_id)? else {
+        return Ok(None);
+    };
+    if share_is_expired(row.expires_at.as_deref(), Utc::now()) {
+        return Ok(None);
+    }
+    let Some(raw) = row.final_snapshot.filter(|s| !s.is_empty()) else {
+        return Ok(None);
+    };
+    Ok(serde_json::from_str(&raw).ok())
+}
+
+pub(crate) fn persist_share_archive(
+    db: &std::path::Path,
+    session_id: &str,
+    snapshot: &SessionSnapshot,
+    title: Option<&str>,
+) -> anyhow::Result<()> {
+    let conn = Connection::open(db)?;
+    let payload = serde_json::to_string(&ArchivedShare {
+        snapshot: snapshot.clone(),
+        title: title.map(str::to_string).filter(|s| !s.is_empty()),
+    })?;
+    conn.execute(
+        "UPDATE shares SET final_snapshot = ?1 WHERE session_id = ?2",
+        rusqlite::params![payload, session_id],
+    )?;
+    Ok(())
+}
+
+pub(crate) fn apply_share_event(
+    snapshot: &mut SessionSnapshot,
+    title: &mut Option<String>,
+    ev: &SessionEvent,
+) {
+    if let SessionEvent::SessionInfo { title: t, .. } = ev {
+        if !t.is_empty() {
+            *title = Some(t.clone());
+        }
+    }
+    snapshot.apply(ev);
 }
 
 fn public_origin(headers: &HeaderMap) -> Option<String> {
     let host = headers
         .get("x-forwarded-host")
-        .or_else(|| headers.get(axum::http::header::HOST))
+        .or_else(|| headers.get(header::HOST))
         .and_then(|v| v.to_str().ok())
         .map(str::trim)
         .filter(|h| !h.is_empty())?;
@@ -551,16 +803,267 @@ fn share_url(headers: &HeaderMap, token: &str) -> String {
     }
 }
 
+/// `true` when Accept prefers text/html over application/json (browsers).
+/// Missing Accept, equal q-values, and `*/*` resolve as JSON (app default).
+pub fn prefers_html(accept: Option<&str>) -> bool {
+    let Some(raw) = accept.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    q_for(raw, "text/html") > q_for(raw, "application/json")
+}
+
+fn q_for(accept: &str, exact: &str) -> f32 {
+    let (want_ty, want_sub) = exact.split_once('/').unwrap_or((exact, "*"));
+    let mut best: Option<f32> = None;
+    for part in accept.split(',') {
+        let mut segs = part.split(';');
+        let media = segs.next().unwrap_or("").trim();
+        let mut q = 1.0_f32;
+        for p in segs {
+            let p = p.trim();
+            if let Some(v) = p.strip_prefix("q=").or_else(|| p.strip_prefix("Q=")) {
+                q = v.trim().parse::<f32>().unwrap_or(0.0).clamp(0.0, 1.0);
+            }
+        }
+        if q <= 0.0 {
+            continue;
+        }
+        let matched = if media == "*/*" {
+            true
+        } else if let Some((t, s)) = media.split_once('/') {
+            t.eq_ignore_ascii_case(want_ty) && (s == "*" || s.eq_ignore_ascii_case(want_sub))
+        } else {
+            false
+        };
+        if matched {
+            best = Some(best.map_or(q, |b| b.max(q)));
+        }
+    }
+    best.unwrap_or(-1.0)
+}
+
+/// NULL/empty `expires_at` means the share never expires.
+pub fn share_is_expired(expires_at: Option<&str>, now: DateTime<Utc>) -> bool {
+    let Some(raw) = expires_at.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    match DateTime::parse_from_rfc3339(raw) {
+        Ok(dt) => dt.with_timezone(&Utc) <= now,
+        Err(_) => true,
+    }
+}
+
+fn parse_expires_in_hours(value: &Option<serde_json::Value>) -> Result<Option<f64>, &'static str> {
+    match value {
+        None => Ok(Some(DEFAULT_SHARE_HOURS)),
+        Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::Number(n)) => {
+            let h = n.as_f64().ok_or("invalid expires_in_hours")?;
+            if !h.is_finite() || h < 0.0 {
+                return Err("invalid expires_in_hours");
+            }
+            Ok(Some(h))
+        }
+        Some(_) => Err("invalid expires_in_hours"),
+    }
+}
+
+fn expires_at_from_hours(hours: Option<f64>, now: DateTime<Utc>) -> Option<String> {
+    let hours = hours?;
+    let millis = (hours * 3_600_000.0).round() as i64;
+    Some((now + chrono::Duration::milliseconds(millis)).to_rfc3339())
+}
+
+fn hours_json(hours: Option<f64>) -> serde_json::Value {
+    match hours {
+        None => serde_json::Value::Null,
+        Some(h) if h.fract() == 0.0 && h.abs() < (i64::MAX as f64) => {
+            serde_json::json!(h as i64)
+        }
+        Some(h) => serde_json::json!(h),
+    }
+}
+
+fn remaining_hours_json(expires_at: Option<&str>, now: DateTime<Utc>) -> serde_json::Value {
+    let Some(raw) = expires_at.map(str::trim).filter(|s| !s.is_empty()) else {
+        return serde_json::Value::Null;
+    };
+    let Ok(dt) = DateTime::parse_from_rfc3339(raw) else {
+        return serde_json::Value::Null;
+    };
+    let secs = (dt.with_timezone(&Utc) - now).num_seconds().max(0) as f64;
+    hours_json(Some((secs / 3600.0).ceil()))
+}
+
+fn accept_header(headers: &HeaderMap) -> Option<&str> {
+    headers.get(header::ACCEPT).and_then(|v| v.to_str().ok())
+}
+
+fn public_ip(headers: &HeaderMap, addr: SocketAddr) -> IpAddr {
+    if let Some(xff) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
+        if let Some(first) = xff.split(',').next() {
+            if let Ok(ip) = first.trim().parse::<IpAddr>() {
+                return ip;
+            }
+        }
+    }
+    addr.ip()
+}
+
+fn allow_public(ip: IpAddr) -> bool {
+    let mut map = PUBLIC_ATTEMPTS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let now = Instant::now();
+    let stamps = map.entry(ip).or_default();
+    stamps.retain(|t| now.saturating_duration_since(*t) < PUBLIC_WINDOW);
+    if stamps.len() >= PUBLIC_MAX_PER_MINUTE {
+        return false;
+    }
+    stamps.push(now);
+    true
+}
+
+fn viewer_template() -> String {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static/viewer.html");
+    if let Ok(s) = std::fs::read_to_string(&path) {
+        if s.contains("__TOKEN__") {
+            return s;
+        }
+    }
+    VIEWER_FALLBACK.to_string()
+}
+
+fn render_viewer(token: &str, session_id: &str, title: &str, expires: &str) -> String {
+    viewer_template()
+        .replace("__TOKEN__", &html_escape(token))
+        .replace("__SESSION_ID__", &html_escape(session_id))
+        .replace("__TITLE__", &html_escape(title))
+        .replace("__EXPIRES__", &html_escape(expires))
+}
+
+fn html_escape(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for c in s.chars() {
+        match c {
+            '&' => out.push_str("&amp;"),
+            '<' => out.push_str("&lt;"),
+            '>' => out.push_str("&gt;"),
+            '"' => out.push_str("&quot;"),
+            '\'' => out.push_str("&#39;"),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+fn expires_placeholder(expires_at: Option<&str>) -> String {
+    match expires_at.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(s) => s.to_string(),
+        None => "never".into(),
+    }
+}
+
+fn error_page(message: &str) -> String {
+    format!(
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\"><title>{0}</title></head><body><h1>{0}</h1></body></html>",
+        html_escape(message)
+    )
+}
+
+fn viewer_html(status: StatusCode, body: String) -> Response {
+    let mut res = Response::new(axum::body::Body::from(body));
+    *res.status_mut() = status;
+    let headers = res.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/html; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    headers.insert(
+        header::CONTENT_SECURITY_POLICY,
+        HeaderValue::from_static(VIEWER_CSP),
+    );
+    res
+}
+
+async fn viewer_title(state: &AppState, session_id: &str, archive_json: Option<&str>) -> String {
+    if let Some(raw) = archive_json {
+        if let Ok(arch) = serde_json::from_str::<ArchivedShare>(raw) {
+            if let Some(t) = arch.title.filter(|s| !s.is_empty()) {
+                return t;
+            }
+        }
+    }
+    if let Some(meta) = state
+        .sessions
+        .list()
+        .await
+        .into_iter()
+        .find(|m| m.id == session_id)
+    {
+        if let Some(name) = meta.name.filter(|s| !s.is_empty()) {
+            return name;
+        }
+    }
+    let db = state.db_path.clone();
+    let sid = session_id.to_string();
+    tokio::task::spawn_blocking(move || -> anyhow::Result<Option<String>> {
+        let reg = cascade_core::SessionRegistry::open(&db)?;
+        Ok(reg.get(&sid)?.and_then(|m| m.name))
+    })
+    .await
+    .ok()
+    .and_then(|r| r.ok())
+    .flatten()
+    .filter(|s| !s.is_empty())
+    .unwrap_or_default()
+}
+
+async fn handle_archived_stream(socket: WebSocket, archive: ArchivedShare) {
+    let (mut sink, mut stream) = socket.split();
+    let snap = SessionEvent::Snapshot(archive.snapshot);
+    if let Ok(text) = serde_json::to_string(&snap) {
+        if sink.send(Message::Text(text.into())).await.is_err() {
+            return;
+        }
+    }
+    let exit = SessionEvent::ProcessExited { code: None };
+    if let Ok(text) = serde_json::to_string(&exit) {
+        let _ = sink.send(Message::Text(text.into())).await;
+    }
+    while let Some(incoming) = stream.next().await {
+        match incoming {
+            Ok(Message::Close(_)) | Err(_) => break,
+            Ok(Message::Ping(p)) => {
+                if sink.send(Message::Pong(p)).await.is_err() {
+                    break;
+                }
+            }
+            Ok(_) => {}
+        }
+    }
+}
+
 async fn handle_stream(
     socket: WebSocket,
     session: cascade_core::OmpSession,
-    _manager: SessionManager,
+    manager: SessionManager,
     read_only: bool,
+    db_path: PathBuf,
 ) {
     let (mut sink, mut stream) = socket.split();
+    let session_id = session.id().to_string();
+    let mut title = manager
+        .list()
+        .await
+        .into_iter()
+        .find(|m| m.id == session_id)
+        .and_then(|m| m.name);
 
     let snapshot = session.snapshot().await;
-    let frame = cascade_core::SessionEvent::Snapshot(snapshot);
+    let frame = SessionEvent::Snapshot(snapshot);
     if let Ok(text) = serde_json::to_string(&frame) {
         let _ = sink.send(Message::Text(text.into())).await;
     }
@@ -603,10 +1106,7 @@ async fn handle_stream(
                             }
                             Ok(CloudCommand::GetState) => match session.get_state().await {
                                 Ok(state) => {
-                                    let frame = cascade_core::SessionEvent::StateChanged;
-                                    // Re-emit the full state payload alongside the event
-                                    // (plus the model catalog) so thin clients don't need a
-                                    // separate REST round-trip.
+                                    let frame = SessionEvent::StateChanged;
                                     let models = session.available_models().await.unwrap_or_default();
                                     let mut ev = serde_json::to_value(&frame)
                                         .unwrap_or(serde_json::Value::Null);
@@ -639,13 +1139,29 @@ async fn handle_stream(
             event = events.recv() => {
                 match event {
                     Ok(ev) => {
+                        if let SessionEvent::SessionInfo { title: t, .. } = &ev {
+                            if !t.is_empty() {
+                                title = Some(t.clone());
+                            }
+                        }
+                        let exiting = matches!(ev, SessionEvent::ProcessExited { .. });
                         match serde_json::to_string(&ev) {
                             Ok(json) => {
-                                if sink.send(Message::Text(json.into())).await.is_err() {
+                                if sink.send(Message::Text(json.into())).await.is_err() && !exiting {
                                     break;
                                 }
                             }
                             Err(e) => tracing::warn!(%e, "serialize SessionEvent"),
+                        }
+                        if exiting {
+                            let snap = session.snapshot().await;
+                            let db = db_path.clone();
+                            let sid = session_id.clone();
+                            let title_owned = title.clone();
+                            let _ = tokio::task::spawn_blocking(move || {
+                                persist_share_archive(&db, &sid, &snap, title_owned.as_deref())
+                            })
+                            .await;
                         }
                     }
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -670,10 +1186,15 @@ mod tests {
         path
     }
 
+    fn mint_default(path: &std::path::Path, session_id: &str) -> String {
+        let exp = expires_at_from_hours(Some(24.0), Utc::now());
+        mint_share(path, session_id, exp.as_deref()).unwrap()
+    }
+
     #[test]
     fn mint_lookup_revoke_share() {
         let path = temp_share_db();
-        let token = mint_share(&path, "sess-1").unwrap();
+        let token = mint_default(&path, "sess-1");
         assert_eq!(
             share_session_for_token(&path, &token).unwrap().as_deref(),
             Some("sess-1")
@@ -692,8 +1213,8 @@ mod tests {
     #[test]
     fn reminting_replaces_old_token() {
         let path = temp_share_db();
-        let first = mint_share(&path, "sess-1").unwrap();
-        let second = mint_share(&path, "sess-1").unwrap();
+        let first = mint_default(&path, "sess-1");
+        let second = mint_default(&path, "sess-1");
         assert_ne!(first, second);
         assert!(share_session_for_token(&path, &first).unwrap().is_none());
         assert_eq!(
@@ -716,5 +1237,118 @@ mod tests {
             "https://wickrunner.com:7701/s/tok"
         );
         assert_eq!(share_url(&HeaderMap::new(), "tok"), "/s/tok");
+    }
+
+    #[test]
+    fn prefers_html_negotiation() {
+        assert!(!prefers_html(None));
+        assert!(!prefers_html(Some("")));
+        assert!(!prefers_html(Some("application/json")));
+        assert!(!prefers_html(Some("*/*")));
+        assert!(prefers_html(Some(
+            "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
+        )));
+        assert!(prefers_html(Some("text/html,application/json;q=0.9")));
+        assert!(!prefers_html(Some("application/json,text/html;q=0.8")));
+        assert!(!prefers_html(Some("text/html,application/json")));
+    }
+
+    #[test]
+    fn share_expiry_check() {
+        let now = Utc::now();
+        assert!(!share_is_expired(None, now));
+        assert!(!share_is_expired(Some(""), now));
+        let future = (now + chrono::Duration::hours(1)).to_rfc3339();
+        let past = (now - chrono::Duration::hours(1)).to_rfc3339();
+        assert!(!share_is_expired(Some(&future), now));
+        assert!(share_is_expired(Some(&past), now));
+        assert!(share_is_expired(Some(&now.to_rfc3339()), now));
+        assert!(share_is_expired(Some("not-a-date"), now));
+    }
+
+    #[test]
+    fn rolling_snapshot_archives_on_process_exit() {
+        let mut snapshot = SessionSnapshot::default();
+        let mut title = None;
+        let message = serde_json::json!({
+            "role": "assistant",
+            "content": [{"type": "text", "text": "done"}]
+        });
+        apply_share_event(
+            &mut snapshot,
+            &mut title,
+            &SessionEvent::MessageEnd {
+                message: message.clone(),
+            },
+        );
+        apply_share_event(
+            &mut snapshot,
+            &mut title,
+            &SessionEvent::ProcessExited { code: Some(0) },
+        );
+        let archived = serde_json::to_value(ArchivedShare { snapshot, title }).unwrap();
+        assert_eq!(
+            archived["snapshot"]["messages"].as_array().unwrap().len(),
+            1
+        );
+        assert_eq!(archived["snapshot"]["messages"][0], message);
+        assert_eq!(archived["snapshot"]["streaming"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn expired_share_does_not_match_stream() {
+        let path = temp_share_db();
+        let past = (Utc::now() - chrono::Duration::hours(1)).to_rfc3339();
+        let token = mint_share(&path, "sess-1", Some(&past)).unwrap();
+        assert!(!share_matches(&path, &token, "sess-1").unwrap());
+        assert!(matches!(
+            share_status(&path, &token, "sess-1").unwrap(),
+            ShareMatch::Expired
+        ));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn forever_share_never_expires() {
+        let path = temp_share_db();
+        let token = mint_share(&path, "sess-1", None).unwrap();
+        let row = lookup_share_by_token(&path, &token).unwrap().unwrap();
+        assert!(row.expires_at.is_none());
+        assert!(share_matches(&path, &token, "sess-1").unwrap());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn migrates_existing_shares_to_24h_expiry() {
+        let path = std::env::temp_dir().join(format!("cascade-share-mig-{}.db", Uuid::new_v4()));
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(
+            "CREATE TABLE shares (
+                token TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            );",
+        )
+        .unwrap();
+        let created = Utc::now() - chrono::Duration::hours(2);
+        conn.execute(
+            "INSERT INTO shares (token, session_id, created_at) VALUES (?1, ?2, ?3)",
+            rusqlite::params!["tok", "sess-1", created.to_rfc3339()],
+        )
+        .unwrap();
+        init_share_tables(&conn).unwrap();
+        let exp: Option<String> = conn
+            .query_row(
+                "SELECT expires_at FROM shares WHERE token = 'tok'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let exp = DateTime::parse_from_rfc3339(&exp.unwrap())
+            .unwrap()
+            .with_timezone(&Utc);
+        let expected = created + chrono::Duration::hours(24);
+        assert!((exp - expected).num_seconds().abs() < 3);
+        let _ = std::fs::remove_file(&path);
     }
 }
