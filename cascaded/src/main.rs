@@ -88,6 +88,22 @@ pub struct AppState {
     pub sessions: SessionManager,
     pub relay: RelayRouter,
     pub terminal_token: String,
+    /// Per-session mutation fences: attach and delete can't interleave.
+    pub session_locks: std::sync::Arc<
+        tokio::sync::Mutex<std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
+    >,
+}
+
+impl AppState {
+    /// The fence for one session id (created on first use).
+    pub async fn session_lock(&self, id: &str) -> std::sync::Arc<tokio::sync::Mutex<()>> {
+        self.session_locks
+            .lock()
+            .await
+            .entry(id.to_string())
+            .or_default()
+            .clone()
+    }
 }
 
 pub fn json_err(status: StatusCode, msg: &str) -> (StatusCode, Json<serde_json::Value>) {
@@ -286,6 +302,7 @@ async fn run_cloud(
         sessions: sessions.clone(),
         relay,
         terminal_token: cfg.terminal_token.clone(),
+        session_locks: Default::default(),
     };
 
     let app = Router::new()

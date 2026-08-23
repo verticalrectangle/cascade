@@ -271,7 +271,7 @@ pub async fn list_sessions(
         out.push(ListedSession {
             id: m.id,
             omp_session_id: None,
-            name: None,
+            name: m.name,
             cwd: m.cwd,
             session_file: None,
             machine: m.machine,

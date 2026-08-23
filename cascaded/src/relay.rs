@@ -64,6 +64,7 @@ pub struct MachineSession {
     pub machine: String,
     pub cwd: String,
     pub created_at: String,
+    pub name: Option<String>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -166,7 +167,7 @@ impl RelayRouter {
     pub fn list_machine_sessions(&self, owner: &str) -> anyhow::Result<Vec<MachineSession>> {
         let conn = Connection::open(&self.db_path)?;
         let mut stmt = conn.prepare(
-            "SELECT id, machine, cwd, created_at FROM machine_sessions WHERE owner = ?1 ORDER BY created_at DESC",
+            "SELECT id, machine, cwd, created_at, name FROM machine_sessions WHERE owner = ?1 ORDER BY created_at DESC",
         )?;
         let mapped = stmt.query_map([owner], |row| {
             Ok(MachineSession {
@@ -174,6 +175,7 @@ impl RelayRouter {
                 machine: row.get(1)?,
                 cwd: row.get(2)?,
                 created_at: row.get(3)?,
+                name: row.get(4)?,
             })
         })?;
         let mut v = Vec::new();
@@ -314,6 +316,7 @@ impl RelayRouter {
                     machine: machine_id.to_string(),
                     cwd: cwd.to_string(),
                     created_at: Utc::now().to_rfc3339(),
+                    name: None,
                 };
                 let db_path = self.db_path.clone();
                 let row2 = row.clone();
@@ -496,7 +499,7 @@ impl RelayRouter {
 
     /// Route one desktop→cloud frame: replies resolve pending requests;
     /// session-scoped payloads fan out to attached clients.
-    async fn route_from_machine(&self, text: &str) {
+    async fn route_from_machine(&self, machine_id: &str, text: &str) {
         let Ok(env) = serde_json::from_str::<RelayEnvelope>(text) else {
             tracing::warn!(payload = text, "relay: bad envelope from machine");
             return;
@@ -510,7 +513,59 @@ impl RelayRouter {
         }
         if let Some(sid) = env.session_id.clone() {
             self.fan_out(&sid, env.payload).await;
+            return;
         }
+        // Session-scoped events carry no session id? Then check announcements.
+        let kind = env.payload.get("kind").and_then(|k| k.as_str()).unwrap_or("");
+        match kind {
+            "session_discovered" | "session_gone" => {
+                self.handle_announce(machine_id, kind, &env.payload).await;
+            }
+            _ => {}
+        }
+    }
+
+    /// Upsert/remove a discovered-session row announced by a desktop daemon.
+    async fn handle_announce(&self, machine_id: &str, kind: &str, payload: &serde_json::Value) {
+        let Some(id) = payload.get("id").and_then(|i| i.as_str()) else { return };
+        let db_path = self.db_path.clone();
+        let kind = kind.to_string();
+        let id = id.to_string();
+        let machine = machine_id.to_string();
+        let cwd = payload.get("cwd").and_then(|c| c.as_str()).unwrap_or("").to_string();
+        let title = payload.get("title").and_then(|t| t.as_str()).map(str::to_string);
+        let _ = tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+            let conn = Connection::open(&db_path)?;
+            let owner: String = conn
+                .query_row(
+                    "SELECT owner FROM machines WHERE id = ?1",
+                    [&machine],
+                    |row| row.get(0),
+                )
+                .unwrap_or_default();
+            match kind.as_str() {
+                "session_discovered" => {
+                    conn.execute(
+                        "INSERT OR REPLACE INTO machine_sessions (id, machine, cwd, created_at, owner, name)
+                         VALUES (?1, ?2, ?3, COALESCE((SELECT created_at FROM machine_sessions WHERE id = ?1), ?4), ?5, ?6)",
+                        rusqlite::params![
+                            id,
+                            machine,
+                            cwd,
+                            Utc::now().to_rfc3339(),
+                            owner,
+                            title
+                        ],
+                    )?;
+                }
+                "session_gone" => {
+                    conn.execute("DELETE FROM machine_sessions WHERE id = ?1", [&id])?;
+                }
+                _ => {}
+            }
+            Ok(())
+        })
+        .await;
     }
 
     /// Whether a machine currently holds an outbound relay connection.
@@ -542,7 +597,8 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
             machine TEXT NOT NULL,
             cwd TEXT NOT NULL,
             created_at TEXT NOT NULL,
-            owner TEXT NOT NULL DEFAULT ''
+            owner TEXT NOT NULL DEFAULT '',
+            name TEXT
         );
         CREATE TABLE IF NOT EXISTS machine_tokens (
             token TEXT PRIMARY KEY,
@@ -557,6 +613,7 @@ pub fn init_tables(conn: &Connection) -> anyhow::Result<()> {
         "owner",
         "TEXT NOT NULL DEFAULT ''",
     )?;
+    crate::auth::ensure_column(conn, "machine_sessions", "name", "TEXT")?;
     Ok(())
 }
 
@@ -706,14 +763,14 @@ async fn handle_relay(socket: WebSocket, state: AppState) {
                 Ok(Message::Close(_)) => break,
                 Ok(Message::Ping(_)) | Ok(Message::Pong(_)) => {}
                 Ok(Message::Text(t)) => {
-                    router.route_from_machine(&t).await;
+                    router.route_from_machine(&id_for_read, &t).await;
                     let path = db_path.clone();
                     let id = id_for_read.clone();
                     let _ = tokio::task::spawn_blocking(move || touch_machine(&path, &id)).await;
                 }
                 Ok(Message::Binary(b)) => {
                     if let Ok(text) = String::from_utf8(b.to_vec()) {
-                        router.route_from_machine(&text).await;
+                        router.route_from_machine(&id_for_read, &text).await;
                     }
                 }
                 Err(_) => break,

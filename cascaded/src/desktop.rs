@@ -34,6 +34,16 @@ impl RelayEnvelope {
     }
 }
 
+/// Desktop→cloud announcements (payloads of outbound envelopes).
+#[derive(Debug, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum DesktopAnnounce {
+    /// A transcript file appeared/changed on disk — list it under this machine.
+    SessionDiscovered { id: String, cwd: String, title: Option<String> },
+    /// The file vanished.
+    SessionGone { id: String },
+}
+
 /// Commands the cloud may send over `/relay`.
 #[derive(Debug, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -52,11 +62,20 @@ enum RelayPayload {
 
 /// Outbound side of the relay connection, shared by every task on this socket.
 type Out = mpsc::UnboundedSender<Message>;
+
+/// session_id → transcript path for discovered (file-backed) sessions.
+type DiscoveredMap = std::sync::Arc<tokio::sync::Mutex<std::collections::HashMap<String, PathBuf>>>;
 pub async fn run_desktop(cfg: Config, mut shutdown: watch::Receiver<bool>) -> anyhow::Result<()> {
     // The outbound WSS needs a rustls CryptoProvider; install once, idempotently.
     let _ = rustls::crypto::ring::default_provider().install_default();
     let registry = cascade_core::SessionRegistry::open(&cfg.db)?;
     let sessions = SessionManager::new(registry);
+
+    // Process-independent session discovery: watch the omp session store.
+    let home = std::env::var("HOME").unwrap_or_else(|_| ".".into());
+    let store = PathBuf::from(home).join(".omp/agent/sessions");
+    let discovered: DiscoveredMap = Default::default();
+    let watcher = cascade_core::watch::SessionWatcher::new(vec![store]);
 
     let cloud_url = cfg
         .cloud_url
@@ -78,7 +97,17 @@ pub async fn run_desktop(cfg: Config, mut shutdown: watch::Receiver<bool>) -> an
             break;
         }
         tracing::info!(%relay_url, "connecting to cloud /relay");
-        match connect_and_serve(&relay_url, &name, &token, sessions.clone(), &mut shutdown).await {
+        match connect_and_serve(
+            &relay_url,
+            &name,
+            &token,
+            sessions.clone(),
+            &mut shutdown,
+            watcher.clone(),
+            &discovered,
+        )
+        .await
+        {
             Ok(()) => {
                 tracing::info!("relay connection closed");
                 delay = Duration::from_secs(1);
@@ -124,6 +153,8 @@ async fn connect_and_serve(
     token: &str,
     sessions: SessionManager,
     shutdown: &mut watch::Receiver<bool>,
+    watcher: cascade_core::watch::SessionWatcher,
+    discovered: &DiscoveredMap,
 ) -> anyhow::Result<()> {
     let (ws, _) = tokio_tungstenite::connect_async(url).await?;
     let (mut sink, mut stream) = ws.split();
@@ -144,6 +175,71 @@ async fn connect_and_serve(
     // All desktop→cloud frames funnel through this channel so spawned event
     // pumps can share the single relay socket.
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<Message>();
+
+    // Announce the session store contents, then stream changes.
+    {
+        let found = watcher.scan_once().await;
+        let mut map = discovered.lock().await;
+        for d in found {
+            map.insert(d.session_id.clone(), d.path.clone());
+            let ann = DesktopAnnounce::SessionDiscovered {
+                id: d.session_id,
+                cwd: d.cwd,
+                title: d.title,
+            };
+            if let Ok(p) = serde_json::to_value(&ann) {
+                if let Some(msg) = (RelayEnvelope { session_id: None, req: None, payload: p }).text() {
+                    let _ = out_tx.send(msg);
+                }
+            }
+        }
+    }
+    let out_watch = out_tx.clone();
+    let discovered_watch = discovered.clone();
+    let watcher2 = watcher;
+    tokio::spawn(async move {
+        use futures_util::StreamExt as _;
+        let mut stream = std::pin::pin!(watcher2.watch().await);
+        while let Some(ev) = stream.next().await {
+            match ev {
+                cascade_core::watch::WatchEvent::Changed(d) => {
+                    discovered_watch
+                        .lock()
+                        .await
+                        .insert(d.session_id.clone(), d.path.clone());
+                    let ann = DesktopAnnounce::SessionDiscovered {
+                        id: d.session_id,
+                        cwd: d.cwd,
+                        title: d.title,
+                    };
+                    if let Ok(p) = serde_json::to_value(&ann) {
+                        if let Some(msg) = (RelayEnvelope { session_id: None, req: None, payload: p }).text() {
+                            if out_watch.send(msg).is_err() {
+                                return;
+                            }
+                        }
+                    }
+                }
+                cascade_core::watch::WatchEvent::Removed(path) => {
+                    let mut map = discovered_watch.lock().await;
+                    let gone: Vec<String> = map
+                        .iter()
+                        .filter(|(_, p)| **p == path)
+                        .map(|(id, _)| id.clone())
+                        .collect();
+                    for id in gone {
+                        map.remove(&id);
+                        let ann = DesktopAnnounce::SessionGone { id };
+                        if let Ok(p) = serde_json::to_value(&ann) {
+                            if let Some(msg) = (RelayEnvelope { session_id: None, req: None, payload: p }).text() {
+                                let _ = out_watch.send(msg);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    });
 
     loop {
         tokio::select! {
@@ -166,11 +262,11 @@ async fn connect_and_serve(
             frame = stream.next() => {
                 match frame {
                     Some(Ok(Message::Text(text))) => {
-                        dispatch_envelope(&sessions, &text, &out_tx).await;
+                        dispatch_envelope(&sessions, &text, &out_tx, discovered).await;
                     }
                     Some(Ok(Message::Binary(b))) => {
                         if let Ok(text) = String::from_utf8(b.to_vec()) {
-                            dispatch_envelope(&sessions, &text, &out_tx).await;
+                            dispatch_envelope(&sessions, &text, &out_tx, discovered).await;
                         }
                     }
                     Some(Ok(Message::Ping(p))) => {
@@ -188,7 +284,12 @@ async fn connect_and_serve(
 
 /// Handle one cloud→desktop envelope. Replies and event frames flow back over
 /// the shared `out` channel.
-async fn dispatch_envelope(sessions: &SessionManager, text: &str, out: &Out) {
+async fn dispatch_envelope(
+    sessions: &SessionManager,
+    text: &str,
+    out: &Out,
+    discovered: &DiscoveredMap,
+) {
     let env: RelayEnvelope = match serde_json::from_str(text) {
         Ok(e) => e,
         Err(_) => {
@@ -254,14 +355,33 @@ async fn dispatch_envelope(sessions: &SessionManager, text: &str, out: &Out) {
             }
         }
         RelayPayload::GetSnapshot => {
-            let Some(session) = session else { return };
-            let snap = session.snapshot().await;
-            let payload = serde_json::to_value(&SessionEvent::Snapshot(snap))
-                .unwrap_or(serde_json::Value::Null);
-            if let Some(id) = env.session_id.as_deref() {
-                if let Some(msg) = RelayEnvelope::event(id, payload).text() {
+            let Some(id) = env.session_id.clone() else { return };
+            if let Some(session) = session {
+                let snap = session.snapshot().await;
+                let payload = serde_json::to_value(&SessionEvent::Snapshot(snap))
+                    .unwrap_or(serde_json::Value::Null);
+                if let Some(msg) = RelayEnvelope::event(&id, payload).text() {
                     let _ = out.send(msg);
                 }
+                return;
+            }
+            // Discovered (file-backed) session: replay the transcript, then
+            // live-tail appended entries as events. Read-only by definition.
+            let path = discovered.lock().await.get(&id).cloned();
+            let Some(path) = path else { return };
+            match cascade_core::replay::parse_snapshot(&path) {
+                Ok(snap) => {
+                    let payload = serde_json::to_value(&SessionEvent::Snapshot(snap))
+                        .unwrap_or(serde_json::Value::Null);
+                    if let Some(msg) = RelayEnvelope::event(&id, payload).text() {
+                        let _ = out.send(msg);
+                    }
+                    let out2 = out.clone();
+                    tokio::spawn(async move {
+                        tail_discovered(&id, path, out2).await;
+                    });
+                }
+                Err(e) => tracing::warn!(%e, session_id = %id, "replay failed"),
             }
         }
         RelayPayload::GetState => {
@@ -319,6 +439,34 @@ async fn dispatch_envelope(sessions: &SessionManager, text: &str, out: &Out) {
                     tracing::warn!(%e, "relay set_thinking failed");
                 }
             }
+        }
+    }
+}
+
+/// Live-tail a discovered transcript: poll for appended entries and forward
+/// them as session events. Stops when the relay socket drops or the file is
+/// deleted.
+async fn tail_discovered(id: &str, path: PathBuf, out: Out) {
+    let mut tailer = cascade_core::replay::FileTailer::new(path.clone());
+    loop {
+        tokio::time::sleep(Duration::from_millis(700)).await;
+        if !path.exists() {
+            break;
+        }
+        match tailer.next_events().await {
+            Ok(events) if !events.is_empty() => {
+                for ev in events {
+                    let payload =
+                        serde_json::to_value(&ev).unwrap_or(serde_json::Value::Null);
+                    if let Some(msg) = RelayEnvelope::event(id, payload).text() {
+                        if out.send(msg).is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            Ok(_) => {}
+            Err(_) => break,
         }
     }
 }

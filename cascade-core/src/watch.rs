@@ -46,6 +46,7 @@ struct CacheEntry {
 }
 
 /// Process-independent discovery of omp JSONL sessions under store roots.
+#[derive(Clone)]
 pub struct SessionWatcher {
     roots: Vec<PathBuf>,
     cache: Arc<Mutex<HashMap<PathBuf, CacheEntry>>>,
