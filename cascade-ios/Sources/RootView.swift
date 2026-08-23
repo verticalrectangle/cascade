@@ -434,6 +434,7 @@ struct RootView: View {
     @State private var showPair = ProcessInfo.processInfo.environment["CASCADE_SHOW_PAIR"] == "1"
     @State private var showOpenLink = false
     @State private var searchText = ""
+    @State private var didAutoAttach = false
     private var t: Theme { theme.t }
 
     var body: some View {
