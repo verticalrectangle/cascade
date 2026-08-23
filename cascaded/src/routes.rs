@@ -926,13 +926,9 @@ fn allow_public(ip: IpAddr) -> bool {
 }
 
 fn viewer_template() -> String {
-    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("static/viewer.html");
-    if let Ok(s) = std::fs::read_to_string(&path) {
-        if s.contains("__TOKEN__") {
-            return s;
-        }
-    }
-    VIEWER_FALLBACK.to_string()
+    // Compile-time embed: the binary is self-contained on the server.
+    let s = include_str!("../static/viewer.html");
+    if s.contains("__TOKEN__") { s.to_string() } else { VIEWER_FALLBACK.to_string() }
 }
 
 fn render_viewer(token: &str, session_id: &str, title: &str, expires: &str) -> String {

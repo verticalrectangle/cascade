@@ -467,7 +467,6 @@ code { background:var(--over); padding:1px 4px; color:var(--pine); font-size:.88
       flushStream();
       $("ended").hidden = false;
       $("ended").textContent = "This session has ended" + (ev.code != null ? " (" + ev.code + ")" : "") + ".";
-      try { ws && ws.close(); } catch {}
       $("reconnect").hidden = true;
       return poke();
     }
