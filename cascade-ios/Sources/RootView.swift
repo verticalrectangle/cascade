@@ -5,7 +5,6 @@
 //  with background stream clients.
 
 import SwiftUI
-import OSLog
 import UIKit
 import Combine
 
@@ -13,7 +12,6 @@ import Combine
 final class AppModel: ObservableObject {
     @Published var sessions: [JoinedSession] = []      // mirror of GET /sessions
     private var refreshing = false
-    private let dbg = Logger(subsystem: "xyz.epsilver.cascade", category: "refresh")
     @Published var account: CascadeClient.Account?
     @Published var active: CascadeClient?
     @Published var showEditor = false
@@ -106,7 +104,6 @@ final class AppModel: ObservableObject {
         // Overlapping refreshes coalesce-cancel each other's URLSession tasks;
         // the catch below used to read that as a dead token and signOut(),
         // looping login → refresh → cancel → signOut forever.
-        dbg.log("MDDBG refresh enter refreshing=\(self.refreshing)")
         guard !refreshing, let account else { return }
         refreshing = true
         defer { refreshing = false }
@@ -133,7 +130,6 @@ final class AppModel: ObservableObject {
             // Preserve user color tags across refreshes.
             let oldTags = loadTags()
             for i in next.indices { next[i].tagColor = oldTags[next[i].id] ?? .default }
-            dbg.log("MDDBG refresh decoded \(metas.count) rows, keeping \(next.count)")
             sessions = next
                 .filter { $0.empty != true }   // zero-content rows never render
                 .sorted { lhs, rhs in
@@ -143,7 +139,6 @@ final class AppModel: ObservableObject {
                 }
             syncWatchers()
         } catch {
-            dbg.log("MDDBG refresh error: \(error)")
             // Cancellation is a superseded refresh, not an auth failure.
             if (error as NSError).code == NSURLErrorCancelled { return }
             // A dead/expired token drops you back on the login screen.
