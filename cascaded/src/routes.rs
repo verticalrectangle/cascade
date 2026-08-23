@@ -443,14 +443,6 @@ pub async fn resolve_share(
     ConnectInfo(addr): ConnectInfo<SocketAddr>,
 ) -> Response {
     let html = prefers_html(accept_header(&headers));
-    if !allow_public(public_ip(&headers, addr)) {
-        return if html {
-            (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
-        } else {
-            json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
-        };
-    }
-
     let db = state.db_path.clone();
     let tok = token.clone();
     let row = match tokio::task::spawn_blocking(move || lookup_share_by_token(&db, &tok)).await {
@@ -463,6 +455,13 @@ pub async fn resolve_share(
         }
     };
     let Some(row) = row else {
+        if !record_public_failure(public_ip(&headers, addr)) {
+            return if html {
+                (StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
+            } else {
+                json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests").into_response()
+            };
+        }
         return if html {
             viewer_html(StatusCode::NOT_FOUND, error_page("Share link not found"))
         } else {
@@ -526,12 +525,17 @@ pub async fn session_stream(
         }
     };
 
-    let jwt_ok = crate::auth::verify_token(&state.jwt_secret, &token).is_ok();
-    if !jwt_ok && !allow_public(public_ip(&headers, addr)) {
-        return Err(json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests"));
-    }
-
-    let access = authorize_stream(&state, &id, &token).await?;
+    let access = match authorize_stream(&state, &id, &token).await {
+        Ok(a) => a,
+        Err(e) => {
+            // Only unknown-token failures count toward the public bucket.
+            let is_unknown = matches!(e.0, StatusCode::UNAUTHORIZED);
+            if is_unknown && !record_public_failure(public_ip(&headers, addr)) {
+                return Err(json_err(StatusCode::TOO_MANY_REQUESTS, "too many requests"));
+            }
+            return Err(e);
+        }
+    };
     let read_only = match access {
         StreamAccess::Owner => false,
         StreamAccess::ReadOnly => true,
@@ -910,7 +914,10 @@ fn public_ip(headers: &HeaderMap, addr: SocketAddr) -> IpAddr {
     addr.ip()
 }
 
-fn allow_public(ip: IpAddr) -> bool {
+/// True when this IP is over the public-failure budget. Counts ONLY failures
+/// (bad/unknown tokens) — valid tokens are never throttled, so a viewer's
+/// reconnect loop can't lock itself out of a good link.
+fn record_public_failure(ip: IpAddr) -> bool {
     let mut map = PUBLIC_ATTEMPTS
         .get_or_init(|| Mutex::new(HashMap::new()))
         .lock()
