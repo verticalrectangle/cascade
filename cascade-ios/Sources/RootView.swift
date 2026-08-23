@@ -106,7 +106,7 @@ final class AppModel: ObservableObject {
         // Overlapping refreshes coalesce-cancel each other's URLSession tasks;
         // the catch below used to read that as a dead token and signOut(),
         // looping login → refresh → cancel → signOut forever.
-        dbg.log("MDDBG refresh enter refreshing=\(self.refreshing) account=\(account == nil ? "nil" : "set")")
+        dbg.log("MDDBG refresh enter refreshing=\(self.refreshing)")
         guard !refreshing, let account else { return }
         refreshing = true
         defer { refreshing = false }
