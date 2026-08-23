@@ -219,7 +219,10 @@ impl OmpSession {
             .stdout(Stdio::piped())
             .stderr(Stdio::inherit())
             .kill_on_drop(true)
-            .env("PI_RPC_EMIT_TITLE", "1");
+            .env("PI_RPC_EMIT_TITLE", "1")
+            // Daemon-spawned omp children must not self-register as terminal
+            // sessions — they are already managed rows. Strip the plugin token.
+            .env_remove("CASCADE_TOKEN");
         if let Some(model) = &opts.model {
             cmd.arg("--model").arg(model);
         }
@@ -352,6 +355,11 @@ impl OmpSession {
 
     pub fn subscribe(&self) -> broadcast::Receiver<SessionEvent> {
         self.inner.events.subscribe()
+    }
+
+    /// Cheap streaming flag for list views (snapshot lock read).
+    pub async fn is_streaming(&self) -> bool {
+        self.inner.snapshot.lock().await.streaming
     }
 
     pub async fn snapshot(&self) -> SessionSnapshot {

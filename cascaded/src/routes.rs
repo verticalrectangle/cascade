@@ -213,6 +213,12 @@ pub struct ListedSession {
     pub view_handle: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<i64>,
+    /// Process is running (None = unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub live: Option<bool>,
+    /// Actively streaming right now (None = unknown).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working: Option<bool>,
 }
 
 pub async fn list_sessions(
@@ -220,13 +226,21 @@ pub async fn list_sessions(
     user: AuthUser,
 ) -> Result<Json<Vec<ListedSession>>, (StatusCode, Json<serde_json::Value>)> {
     let uid = user.uid.clone();
-    let mut out: Vec<ListedSession> = state
+    let metas: Vec<cascade_core::SessionMeta> = state
         .sessions
         .list()
         .await
         .into_iter()
         .filter(|m| m.owner == uid)
-        .map(|m| ListedSession {
+        .collect();
+    let mut out: Vec<ListedSession> = Vec::with_capacity(metas.len());
+    for m in metas {
+        // Process truth for cloud-local sessions: the manager only holds live processes.
+        let (live, working) = match state.sessions.get(&m.id).await {
+            Some(sess) => (Some(true), Some(sess.is_streaming().await)),
+            None => (Some(false), Some(false)),
+        };
+        out.push(ListedSession {
             id: m.id,
             omp_session_id: m.omp_session_id,
             name: m.name,
@@ -239,8 +253,10 @@ pub async fn list_sessions(
             join_handle: None,
             view_handle: None,
             pid: None,
-        })
-        .collect();
+            live,
+            working,
+        });
+    }
     let db = state.db_path.clone();
     let term_uid = uid.clone();
     let terminals = tokio::task::spawn_blocking(move || crate::terminal::list(&db, &term_uid))
@@ -251,6 +267,7 @@ pub async fn list_sessions(
         let created = chrono::DateTime::parse_from_rfc3339(&m.created_at)
             .map(|d| d.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
+        let live = Some(state.relay.machine_online(&m.machine).await);
         out.push(ListedSession {
             id: m.id,
             omp_session_id: None,
@@ -264,6 +281,8 @@ pub async fn list_sessions(
             join_handle: None,
             view_handle: None,
             pid: None,
+            live,
+            working: None,
         });
     }
     for t in terminals {
@@ -283,6 +302,8 @@ pub async fn list_sessions(
             join_handle: Some(t.join_handle),
             view_handle: Some(t.view_handle),
             pid: t.pid,
+            live: Some(true),
+            working: None,
         });
     }
     Ok(Json(out))

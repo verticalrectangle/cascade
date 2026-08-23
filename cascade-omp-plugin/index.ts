@@ -463,7 +463,10 @@ export default function (pi: ExtensionAPI): void {
 
 	pi.on("session_start", (_event, ctx) => {
 		safe("session_start", async () => {
-			if (ctx.mode !== "tui") return;
+			// Register interactive TUI sessions and harness/rpc main sessions alike.
+			// (Daemon-spawned rpc-ui sessions are excluded by cascade-core, which
+			// strips CASCADE_TOKEN from child env — they show as managed rows.)
+			if (ctx.mode === "print" || ctx.mode === "json") return;
 			if (envTruthy(process.env.CASCADE_DISABLE)) {
 				log.debug("cascade-omp-plugin: CASCADE_DISABLE set; skipping");
 				return;
