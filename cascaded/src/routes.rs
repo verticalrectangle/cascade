@@ -289,6 +289,13 @@ pub async fn list_sessions(
         } else {
             Some(state.relay.machine_online(&m.machine).await)
         };
+        // A discovered file being written right now means the owning process is
+        // producing output — treat sub-minute freshness as actively working.
+        let working = if is_discovered {
+            Some((chrono::Utc::now() - last_active).num_seconds() < 60)
+        } else {
+            None
+        };
         let empty = if is_discovered { Some(m.messages == 0) } else { Some(m.name.is_none() && live == Some(false)) };
         out.push(ListedSession {
             id: m.id,
@@ -304,7 +311,7 @@ pub async fn list_sessions(
             view_handle: None,
             pid: None,
             live,
-            working: None,
+            working,
             empty,
             origin: Some(m.origin),
         });
