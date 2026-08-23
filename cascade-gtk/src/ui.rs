@@ -1711,16 +1711,38 @@ fn render_rail(ui: &Rc<RefCell<Ui>>) {
         })
         .collect();
 
-    filtered.sort_by(|a, b| {
+    filtered.retain(|m| !is_empty_row(m));
+
+    // The division is the organizing principle: what's alive right now vs
+    // history. Idle counts as alive — a session must not jump sections every
+    // time a turn pauses; only a dead process drops it to ENDED.
+    let (mut live, mut ended): (Vec<&ListedSession>, Vec<&ListedSession>) = filtered
+        .into_iter()
+        .partition(|m| !matches!(RailStatus::from_meta(m), RailStatus::Ended));
+    live.sort_by(|a, b| {
         RailStatus::from_meta(a)
             .cmp(&RailStatus::from_meta(b))
             .then_with(|| b.last_active.cmp(&a.last_active))
     });
+    ended.sort_by(|a, b| b.last_active.cmp(&a.last_active));
 
-    filtered.retain(|m| !is_empty_row(m));
-
-    for meta in filtered {
-        u.rail_list.append(&rail_row(ui, meta));
+    if !live.is_empty() {
+        let h = Label::new(Some("LIVE"));
+        h.add_css_class("rail-section");
+        h.set_xalign(0.0);
+        u.rail_list.append(&h);
+        for meta in live {
+            u.rail_list.append(&rail_row(ui, meta));
+        }
+    }
+    if !ended.is_empty() {
+        let h = Label::new(Some("ENDED"));
+        h.add_css_class("rail-section");
+        h.set_xalign(0.0);
+        u.rail_list.append(&h);
+        for meta in ended {
+            u.rail_list.append(&rail_row(ui, meta));
+        }
     }
 }
 
