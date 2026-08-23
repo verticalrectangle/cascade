@@ -130,6 +130,7 @@ final class AppModel: ObservableObject {
             // Preserve user color tags across refreshes.
             let oldTags = loadTags()
             for i in next.indices { next[i].tagColor = oldTags[next[i].id] ?? .default }
+            print("MDDBG refresh decoded \(metas.count) rows, keeping \(next.count)")
             sessions = next
                 .filter { $0.empty != true }   // zero-content rows never render
                 .sorted { lhs, rhs in
@@ -139,6 +140,7 @@ final class AppModel: ObservableObject {
                 }
             syncWatchers()
         } catch {
+            print("MDDBG refresh error: \(error)")
             // Cancellation is a superseded refresh, not an auth failure.
             if (error as NSError).code == NSURLErrorCancelled { return }
             // A dead/expired token drops you back on the login screen.
