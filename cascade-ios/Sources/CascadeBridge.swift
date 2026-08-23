@@ -595,6 +595,14 @@ final class CascadeClient: ObservableObject {
         guard !terminated, guestSocket == nil else { return }
         var comps = URLComponents(url: base.appendingPathComponent("sessions/\(targetId)/stream"), resolvingAgainstBaseURL: false)!
         comps.scheme = comps.scheme == "https" ? "wss" : "ws"
+        // Tail-only initial snapshot: a full transcript frame blows past
+        // URLSessionWebSocketTask's frame limit ("Message too long" → silent
+        // empty editor). Older history paging comes with the iOS scroll-up
+        // pass; read-only guests keep the full snapshot (they can't send
+        // page commands anyway).
+        if !readOnly {
+            comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "tail", value: "100")]
+        }
         guard let wsURL = comps.url else {
             phase = "ended"; endedReason = "bad host url"; rebuild()
             return
