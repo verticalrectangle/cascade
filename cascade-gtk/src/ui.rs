@@ -1831,27 +1831,43 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
     }
     attach_copy_menu(&tv, "Copy code");
 
-    let lines = code.lines().count();
+    let lines: Vec<&str> = code.lines().collect();
     let cap_lines = (CODE_CAP_PX as f64 / 17.0) as usize;
-    if lines > cap_lines {
-        let scroll = ScrolledWindow::new();
-        scroll.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
-        scroll.set_vscrollbar_policy(gtk4::PolicyType::Automatic);
-        scroll.set_propagate_natural_height(true);
-        scroll.set_max_content_height(CODE_CAP_PX);
-        scroll.set_child(Some(&tv));
-        card.append(&scroll);
+    if lines.len() > cap_lines {
+        // Cap by swapping buffer content, not a nested scroll window — a
+        // TextView inside ScrolledWindow with natural-height propagation
+        // measures to zero and shows an empty body.
+        let hidden = lines.len() - cap_lines;
+        let code_owned = code.to_string();
+        let capped_slice = lines[..cap_lines].join("\n");
+        let lang_owned = lang.to_string();
+        let render = move |buf: &gtk4::TextBuffer, full: bool| {
+            buf.set_text("");
+            let slice = if full { &code_owned } else { &capped_slice };
+            for (text, tag) in highlight::highlight(slice, &lang_owned) {
+                insert_tagged(buf, &text, tag);
+            }
+        };
+        render(&buf, false);
+        card.append(&tv);
 
-        let hidden = lines - cap_lines;
         let more = Button::with_label(&format!("{hidden} more lines ▾"));
         more.add_css_class("code-more");
-        let scroll_c = scroll.clone();
+        let expanded = std::cell::Cell::new(false);
+        let ui_c = ui.clone();
         more.connect_clicked(move |btn| {
-            if scroll_c.max_content_height() > 0 {
-                scroll_c.set_max_content_height(-1);
-                btn.set_label("show less ▴");
+            // Same rule as chips and card chevrons: expanding pushes content
+            // down; the bottom-pin must not convert it into an upward shove.
+            ui_c.borrow().follow.set(false);
+            let now = !expanded.get();
+            expanded.set(now);
+            render(&buf, now);
+            btn.set_label(if now {
+                "show less ▴"
             } else {
-                scroll_c.set_max_content_height(CODE_CAP_PX);
+                ""
+            });
+            if !now {
                 btn.set_label(&format!("{hidden} more lines ▾"));
             }
         });
