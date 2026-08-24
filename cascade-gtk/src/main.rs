@@ -37,6 +37,13 @@ pub fn apply_theme(name: &str) {
 }
 
 fn main() {
+    // Vulkan on this stack goes suboptimal and stops presenting frames until
+    // an input event forces one — the "frozen until I scroll" stall. GL
+    // presents reliably. Respect an explicit user override.
+    if std::env::var("GSK_RENDERER").is_err() {
+        unsafe { std::env::set_var("GSK_RENDERER", "gl") };
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::from_default_env()
