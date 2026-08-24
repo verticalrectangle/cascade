@@ -2443,9 +2443,10 @@ fn paste_image(ui: &Rc<RefCell<Ui>>) -> bool {
 // ── rail rendering ───────────────────────────────────────────────────
 
 fn meta_kind(m: &ListedSession) -> BackendKind {
-    // A join_handle means a live collab room — attach there regardless of
-    // origin so the composer can actually prompt the session.
-    if m.kind == "terminal" || m.join_handle.is_some() {
+    // Discovered rows with a join_handle attach through the proxy for
+    // history and open the room as a prompt side-channel (dual-channel).
+    // Pure terminal rows (no discovered origin) attach straight to the room.
+    if m.join_handle.is_some() && m.origin.as_deref() != Some("discovered") {
         BackendKind::Terminal
     } else if m.machine == "cloud" || m.machine.is_empty() {
         BackendKind::Cloud

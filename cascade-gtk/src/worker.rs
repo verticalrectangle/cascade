@@ -26,6 +26,9 @@ pub enum SessionBackend {
     Cloud {
         session_id: String,
         cmd: mpsc::UnboundedSender<CloudCommand>,
+        /// Dual-channel attach: history rides the proxy stream, prompts ride
+        /// the session's collab room. Set when the row has a join_handle.
+        guest_cmd: Option<mpsc::Sender<GuestCommand>>,
     },
     Terminal {
         session_id: String,
@@ -53,7 +56,13 @@ impl SessionBackend {
     pub async fn prompt(&self, message: String) -> anyhow::Result<()> {
         match self {
             Self::Local(s) => s.prompt(message).await,
-            Self::Cloud { cmd, .. } => {
+            Self::Cloud { cmd, guest_cmd, .. } => {
+                if let Some(g) = guest_cmd {
+                    return g
+                        .send(GuestCommand::Prompt { text: message })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("guest prompt: {e}"));
+                }
                 cmd.send(CloudCommand::Prompt { message })?;
                 Ok(())
             }
@@ -69,7 +78,13 @@ impl SessionBackend {
     pub async fn abort(&self) -> anyhow::Result<()> {
         match self {
             Self::Local(s) => s.abort().await,
-            Self::Cloud { cmd, .. } => {
+            Self::Cloud { cmd, guest_cmd, .. } => {
+                if let Some(g) = guest_cmd {
+                    return g
+                        .send(GuestCommand::Abort)
+                        .await
+                        .map_err(|e| anyhow::anyhow!("guest abort: {e}"));
+                }
                 cmd.send(CloudCommand::Abort)?;
                 Ok(())
             }
@@ -87,7 +102,13 @@ impl SessionBackend {
     pub async fn steer(&self, message: String) -> anyhow::Result<()> {
         match self {
             Self::Local(s) => s.steer(message).await,
-            Self::Cloud { cmd, .. } => {
+            Self::Cloud { cmd, guest_cmd, .. } => {
+                if let Some(g) = guest_cmd {
+                    return g
+                        .send(GuestCommand::Prompt { text: message })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("guest steer: {e}"));
+                }
                 cmd.send(CloudCommand::Prompt { message })?;
                 Ok(())
             }
@@ -528,6 +549,7 @@ pub async fn worker(
                                     current = Some(SessionBackend::Cloud {
                                         session_id: id.clone(),
                                         cmd: cmd_tx,
+                                        guest_cmd: None,
                                     });
                                     pump =
                                         Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
@@ -574,19 +596,30 @@ pub async fn worker(
                 let filtered: Vec<_> = list
                     .into_iter()
                     .filter(|m| match kind {
-                        BackendKind::Terminal => m.kind == "terminal",
+                        // Mirror meta_kind: pure terminal = join_handle with a
+                        // non-discovered origin; merged discovered rows stay
+                        // Local so the dual-channel attach gets exercised.
+                        BackendKind::Terminal => {
+                            m.join_handle.is_some()
+                                && m.origin.as_deref() != Some("discovered")
+                        }
                         BackendKind::Cloud => {
                             m.kind != "terminal" && (m.machine == "cloud" || m.machine.is_empty())
                         }
                         BackendKind::Local => {
-                            m.kind != "terminal" && !(m.machine == "cloud" || m.machine.is_empty())
+                            !(m.machine == "cloud" || m.machine.is_empty())
+                                && !(m.join_handle.is_some()
+                                    && m.origin.as_deref() != Some("discovered"))
                         }
                     })
                     .collect();
                 match filtered.get(index) {
                     Some(meta) => {
                         let id = meta.id.clone();
-                        let jh = terminal_links.get(&id).cloned();
+                        let jh = meta
+                            .join_handle
+                            .clone()
+                            .or_else(|| terminal_links.get(&id).cloned());
                         let _ = cmd_tx
                             .send(Cmd::OpenSession {
                                 id,
@@ -617,8 +650,10 @@ pub async fn worker(
                             .await;
                     } else if let Some(client) = cloud.as_ref() {
                         // Machine-hosted row (spawned or discovered on a desktop
-                        // daemon): attach through the cloud relay proxy.
-                        attach_cloud(
+                        // daemon): history attaches through the cloud relay
+                        // proxy; prompts ride the collab room when the row has
+                        // a join_handle (dual-channel attach).
+                        let attached = attach_cloud(
                             client,
                             &id,
                             None,
@@ -630,6 +665,33 @@ pub async fn worker(
                             &inbox,
                         )
                         .await;
+                        if attached {
+                            if let Some(link) =
+                                join_handle.as_deref().filter(|s| !s.is_empty())
+                            {
+                                match CollabAttach::connect(link).await {
+                                    Ok((mut guest_ev, guest_tx)) => {
+                                        if let Some(SessionBackend::Cloud { guest_cmd, .. }) =
+                                            current.as_mut()
+                                        {
+                                            *guest_cmd = Some(guest_tx);
+                                        }
+                                        // Events duplicate the proxy feed;
+                                        // drain so the guest link stays alive.
+                                        tokio::spawn(async move {
+                                            while guest_ev.recv().await.is_ok() {}
+                                        });
+                                    }
+                                    Err(e) => {
+                                        let _ = ui_tx
+                                            .send(UiMsg::Toast(format!(
+                                                "prompt channel unavailable: {e:#}"
+                                            )))
+                                            .await;
+                                    }
+                                }
+                            }
+                        }
                     } else {
                         let _ = ui_tx
                             .send(UiMsg::Error(format!("local session {id} not running")))
@@ -651,6 +713,7 @@ pub async fn worker(
                             current = Some(SessionBackend::Cloud {
                                 session_id: id.clone(),
                                 cmd: cmd_tx,
+                                guest_cmd: None,
                             });
                             pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
@@ -977,7 +1040,7 @@ async fn attach_cloud(
     ui_tx: &async_channel::Sender<UiMsg>,
     settings: &Settings,
     inbox: &Inbox,
-) {
+) -> bool {
     // Owner attach pages the transcript (tail first, older on scroll-up);
     // shared/guest attach still gets the full snapshot — read-only streams
     // drop page commands, and the client buffers the overflow locally.
@@ -996,6 +1059,7 @@ async fn attach_cloud(
             *current = Some(SessionBackend::Cloud {
                 session_id: session_id.to_string(),
                 cmd: cmd_tx,
+                guest_cmd: None,
             });
             *pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
             let _ = ui_tx
@@ -1010,6 +1074,8 @@ async fn attach_cloud(
         }
         Err(e) => {
             let _ = ui_tx.send(UiMsg::Error(format!("attach: {e:#}"))).await;
+            return false;
         }
     }
+    true
 }
