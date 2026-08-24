@@ -1169,11 +1169,12 @@ async fn refresh_guest_channel(
     if new_link == current_link {
         return;
     }
-    if let Some(SessionBackend::Cloud { guest_pump, guest_cmd, guest_link, .. }) = current.as_mut()
+    if let Some(SessionBackend::Cloud { guest_pump, guest_cmd, guest_link, guest_live, .. }) = current.as_mut()
     {
         if let Some(h) = guest_pump.take() {
             h.abort();
         }
+        guest_live.store(false, std::sync::atomic::Ordering::Relaxed);
         *guest_cmd = None;
         *guest_link = None;
     }
@@ -1226,10 +1227,11 @@ async fn attach_cloud(
             if let Some(h) = pump.take() {
                 h.abort();
             }
-            if let Some(SessionBackend::Cloud { guest_pump, .. }) = current.as_mut() {
+            if let Some(SessionBackend::Cloud { guest_pump, guest_live, .. }) = current.as_mut() {
                 if let Some(h) = guest_pump.take() {
                     h.abort();
                 }
+                guest_live.store(false, std::sync::atomic::Ordering::Relaxed);
             }
             let guest_live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
             let pump_flag = guest_live.clone();

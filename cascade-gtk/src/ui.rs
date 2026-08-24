@@ -229,6 +229,8 @@ struct StreamState {
     pending_ui: Option<String>,
     streaming: bool,
     thinking_text: String,
+    pending_text: String,
+    flush_scheduled: bool,
     /// Text of the last optimistically-rendered user bubble + when, used to
     /// suppress the duplicate from the MessageEnd echo of the same message.
     last_user_echo: Option<(String, std::time::Instant)>,
@@ -1495,6 +1497,71 @@ fn display_width(s: &str) -> usize {
 /// Greedy word-boundary wrap for bodies rendered with wrap=None —
 /// keeps prose readable while the widget's height stays an exact line
 /// count (no height-for-width slab).
+fn flush_pending_text(ui: &Rc<RefCell<Ui>>, tv: &TextView) {
+    let text = {
+        let mut u = ui.borrow_mut();
+        std::mem::take(&mut u.stream.pending_text)
+    };
+    if text.is_empty() {
+        return;
+    }
+    insert_faded(ui, tv, &text);
+    tv.queue_resize();
+}
+
+fn schedule_text_flush(ui: &Rc<RefCell<Ui>>, tv: TextView) {
+    if ui.borrow().stream.flush_scheduled {
+        return;
+    }
+    ui.borrow_mut().stream.flush_scheduled = true;
+    let ui2 = ui.clone();
+    glib::timeout_add_local(std::time::Duration::from_millis(40), move || {
+        ui2.borrow_mut().stream.flush_scheduled = false;
+        flush_pending_text(&ui2, &tv);
+        glib::ControlFlow::Break
+    });
+}
+
+/// Parse "#RRGGBB" into an RGBA at the given alpha.
+fn hex_rgba(hex: &str, alpha: f64) -> gdk::RGBA {
+    let h = hex.trim_start_matches('#');
+    let p = |i: usize| f64::from(u8::from_str_radix(&h[i..i + 2], 16).unwrap_or(0)) / 255.0;
+    gdk::RGBA::new(p(0) as f32, p(2) as f32, p(4) as f32, alpha as f32)
+}
+
+/// Insert a text batch with an alpha-ramp fade-in: the run materializes over
+/// ~180ms, then the fade tag comes off and the base tag's color shows.
+fn insert_faded(ui: &Rc<RefCell<Ui>>, tv: &TextView, text: &str) {
+    let theme = ui.borrow().settings.theme.clone();
+    let hex = palette(&theme).text;
+    let buf = tv.buffer();
+    let Some(base) = buf.tag_table().lookup("assistant") else {
+        insert_tagged(&buf, text, "assistant");
+        return;
+    };
+    let fade = gtk4::TextTag::new(None);
+    fade.set_foreground_rgba(Some(&hex_rgba(hex, 0.0)));
+    buf.tag_table().add(&fade);
+    let start = buf.end_iter();
+    let mut end = buf.end_iter();
+    buf.insert_with_tags(&mut end, text, &[&fade, &base]);
+    let mut step = 0u32;
+    let hex = hex.to_string();
+    glib::timeout_add_local(std::time::Duration::from_millis(20), move || {
+        step += 1;
+        let a = (step as f64 / 9.0).min(1.0);
+        fade.set_foreground_rgba(Some(&hex_rgba(&hex, a)));
+        if step >= 9 {
+            let mut e = buf.end_iter();
+            buf.remove_tag(&fade, &start, &mut e);
+            buf.tag_table().remove(&fade);
+            glib::ControlFlow::Break
+        } else {
+            glib::ControlFlow::Continue
+        }
+    });
+}
+
 fn soft_wrap(text: &str, width: usize) -> String {
     let mut out = String::new();
     for line in text.lines() {
@@ -2859,6 +2926,12 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                     .and_then(|m| m.working)
                 {
                     set_streaming(ui, working);
+                    // Server says the turn is over but a stale streaming view
+                    // is still open (its agent_end died in a flap) — settle
+                    // it, or text parts keep getting skipped forever.
+                    if !working && ui.borrow().stream.assistant.is_some() {
+                        settle_live(ui);
+                    }
                 }
             }
             ui.borrow_mut().metas = list;
@@ -3413,14 +3486,16 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
     match ev {
         SessionEvent::Ready { .. } => {
             set_streaming(ui, false);
-            // (Re)connect welcome: the event mapper resets and re-delivers
-            // in-flight content whole. Wipe the transient region so it
-            // renders exactly once instead of stacking on the pre-reset copy.
+            // (Re)connect welcome: the mapper resets and re-delivers deltas
+            // whole. Reset ONLY the replay-duplicating accumulators — live
+            // content stays; a just-rendered message must survive the flap.
             let mut u = ui.borrow_mut();
-            clear_box(&u.live_box);
-            u.stream.assistant = None;
+            if let Some(tv) = u.stream.assistant.take() {
+                tv.buffer().set_text("");
+            }
             u.stream.thinking_body = None;
             u.stream.thinking_text.clear();
+            u.stream.pending_text.clear();
             u.current_strip = None;
         }
         SessionEvent::TurnStarted => {
@@ -3446,9 +3521,18 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     tv
                 }
             };
-            let buf = tv.buffer();
-            insert_tagged(&buf, &delta, "assistant");
-            tv.queue_resize();
+            // Batch deltas (~40ms) and fade each batch in — text materializes
+            // like it's being written instead of slamming in per-token.
+            {
+                let mut u = ui.borrow_mut();
+                u.stream.pending_text.push_str(&delta);
+            }
+            let force = ui.borrow().stream.pending_text.len() >= 30;
+            if force {
+                flush_pending_text(ui, &tv);
+            } else {
+                schedule_text_flush(ui, tv);
+            }
         }
         SessionEvent::ThinkingDelta { delta, .. } => {
             // Thinking streams into a live strip chip that updates in place —
