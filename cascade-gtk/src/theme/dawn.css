@@ -932,7 +932,7 @@ selection {
 .tool-strip { margin: 2px 0 6px 0; }
 .tool-strip-scroll { min-height: 30px; }
 .chip {
-  border-radius: 14px;
+  border-radius: 0;
   padding: 4px 11px;
   background-color: rgba(87, 82, 121, 0.06);
   border: 1px solid rgba(87, 82, 121, 0.16);
