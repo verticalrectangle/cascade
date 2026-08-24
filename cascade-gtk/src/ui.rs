@@ -2238,8 +2238,13 @@ impl ToolStrip {
         if chip.status == ChipStatus::Error {
             card.add_css_class("advisory-error");
         }
+        // Reveal after one frame: the first measure can be wrong for a frame
+        // (that's the jitter) — hide, force re-measure, then show the card
+        // already-correct.
+        card.set_visible(false);
         self.expansion.append(&card);
         self.expansion.queue_resize();
+        glib::idle_add_local_once(move || card.set_visible(true));
     }
 }
 
@@ -2293,6 +2298,14 @@ fn make_tool_card(
 
     let body = new_view(ui);
     body.add_css_class("tool-body");
+    // Mono tool output must not wrap: height-for-width with very long
+    // lines (JSON args, literal \n) mis-measures into an over-tall card
+    // with a blank slab below the text. wrap=None makes the height an
+    // exact line count, like code blocks. Prose cards (thinking,
+    // advisory) keep word wrap.
+    if kind_class == "tool-tool-use" {
+        body.set_wrap_mode(gtk4::WrapMode::None);
+    }
     let _ = body_tag; // caller inserts with the given tag
     card.append(&body);
 
