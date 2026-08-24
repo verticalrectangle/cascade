@@ -2154,6 +2154,10 @@ impl ToolStrip {
     }
 
     fn toggle_open(&self, ui: &Rc<RefCell<Ui>>, id: &str) {
+        // Unpin from the bottom: the expansion must push content below it
+        // down — with follow set, the bottom-pin converts that into an
+        // upward shove that moves the tapped chip off screen.
+        ui.borrow().follow.set(false);
         let mut st = self.state.borrow_mut();
         if st.open.as_deref() == Some(id) {
             st.open = None;
@@ -2263,7 +2267,9 @@ fn make_tool_card(
     let body_c = body.clone();
     let chev_c = chevron.clone();
     let card_c = card.clone();
+    let ui_c = ui.clone();
     header_btn.connect_clicked(move |_| {
+        ui_c.borrow().follow.set(false); // expanding pushes down, not up
         let show = !body_c.is_visible();
         body_c.set_visible(show);
         chev_c.set_text(if show { "▾" } else { "▸" });
