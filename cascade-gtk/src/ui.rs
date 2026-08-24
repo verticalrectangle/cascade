@@ -38,6 +38,10 @@ const RAIL_MAX: i32 = 400;
 const PANE_MIN: i32 = 280;
 const PANE_MAX: i32 = 600;
 const FOLLOW_MARGIN: f64 = 48.0;
+/// Re-engage slack: landing within this of the bottom re-pins. Needs to
+/// outpace a growing transcript — 48px lost every time content grew
+/// between the scroll and the check, which is why the pin never came back.
+const FOLLOW_REENGAGE_MARGIN: f64 = 160.0;
 /// Scroll distance from the transcript top that triggers a history page.
 const HISTORY_TRIGGER: f64 = 150.0;
 /// Rolling window of rendered-message fingerprints (room + tailer / replay).
@@ -305,6 +309,7 @@ pub struct Ui {
     rail_search: Entry,
     rail_list: GtkBox,
     transcript_scroll: ScrolledWindow,
+    jump_pill: Button,
     durable_box: GtkBox,
     live_box: GtkBox,
     follow: Cell<bool>,
@@ -591,6 +596,16 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     transcript_overlay.add_overlay(&plan_reveal);
     transcript_overlay.set_vexpand(true);
 
+    // "↓ new messages" jump pill — floats over the transcript when content
+    // exists below the fold and follow is off; tap to rejoin the stream.
+    let jump_pill = Button::with_label("↓  new messages");
+    jump_pill.add_css_class("jump-pill");
+    jump_pill.set_halign(gtk4::Align::Center);
+    jump_pill.set_valign(gtk4::Align::End);
+    jump_pill.set_margin_bottom(14);
+    jump_pill.set_visible(false);
+    transcript_overlay.add_overlay(&jump_pill);
+
     // ── composer ──────────────────────────────────────────────────
     let question_host = GtkBox::new(Orientation::Vertical, 8);
 
@@ -841,6 +856,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         follow: Cell::new(true),
         programmatic: Cell::new(false),
         current_strip: None,
+        jump_pill,
         history: VecDeque::new(),
         history_oldest_rendered: 0,
         history_server_more: false,
@@ -1035,15 +1051,31 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
 
     // ── scroll pinning ────────────────────────────────────────────
     {
+        let jump = ui.borrow().jump_pill.clone();
+        jump.connect_clicked(glib::clone!(#[strong] ui, move |_| {
+            let u = ui.borrow();
+            let adj = u.transcript_scroll.vadjustment();
+            u.programmatic.set(true);
+            adj.set_value((adj.upper() - adj.page_size()).max(0.0));
+            u.programmatic.set(false);
+            u.follow.set(true);
+            u.jump_pill.set_visible(false);
+        }));
         let adj = ui.borrow().transcript_scroll.vadjustment();
         adj.connect_value_changed(glib::clone!(#[strong] ui, move |adj| {
             let near_top = {
                 let u = ui.borrow();
-                !u.programmatic.get() && {
-                    let at_bottom = adj.value() >= adj.upper() - adj.page_size() - FOLLOW_MARGIN;
-                    u.follow.set(at_bottom);
-                    adj.value() < HISTORY_TRIGGER
+                if !u.programmatic.get() {
+                    // Drop quickly, re-engage with slack — a growing transcript
+                    // otherwise strands the pin just above the bottom forever.
+                    let gap = adj.upper() - adj.page_size() - adj.value();
+                    if gap > FOLLOW_MARGIN {
+                        u.follow.set(false);
+                    } else if gap <= FOLLOW_REENGAGE_MARGIN {
+                        u.follow.set(true);
+                    }
                 }
+                adj.value() < HISTORY_TRIGGER
             };
             if near_top {
                 // Defer: the follow tick-callback emits value-changed from

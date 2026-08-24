@@ -967,3 +967,16 @@ selection {
 
 /* error chip — failed tool, closed by default */
 .chip-error { border-color: rgba(180, 99, 122, 0.55); background-color: rgba(180, 99, 122, 0.08); }
+
+/* jump-to-latest pill */
+.jump-pill {
+  border-radius: 0;
+  padding: 6px 14px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #575279;
+  background-color: rgba(250, 244, 237, 0.94);
+  border: 1px solid rgba(87, 82, 121, 0.25);
+  box-shadow: 0 2px 10px rgba(87, 82, 121, 0.18);
+}

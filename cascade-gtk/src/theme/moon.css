@@ -977,3 +977,16 @@ selection {
 
 /* error chip — failed tool, closed by default */
 .chip-error { border-color: rgba(235, 111, 146, 0.55); background-color: rgba(235, 111, 146, 0.1); }
+
+/* jump-to-latest pill */
+.jump-pill {
+  border-radius: 0;
+  padding: 6px 14px;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 1px;
+  color: #E0DEF4;
+  background-color: rgba(35, 33, 54, 0.94);
+  border: 1px solid rgba(224, 222, 244, 0.22);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.4);
+}
