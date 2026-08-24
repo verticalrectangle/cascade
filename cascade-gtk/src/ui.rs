@@ -3694,12 +3694,17 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                             match ty {
                                 "thinking" | "redactedThinking" | "reasoning" => {
                                     if let Some(text) = thinking_text(part) {
-                                        // A delta-driven live chip (if any) becomes
-                                        // the final chip — no second card for the
-                                        // same thinking block.
-                                        if ui.borrow().stream.thinking_text.is_empty() {
-                                            append_thinking_chip(ui, &live, &text, true);
-                                        } else {
+                                        // Key on the live CHIP, not the
+                                        // accumulator: a reconnect clears the
+                                        // accumulator while the chip survives,
+                                        // and the empty check then spawned a
+                                        // duplicate chip for the same block.
+                                        let has_live = ui
+                                            .borrow()
+                                            .current_strip
+                                            .as_ref()
+                                            .is_some_and(|s| s.has("think-live"));
+                                        if has_live {
                                             strip_for(ui, &live, true).upsert_thinking(
                                                 ui,
                                                 "think-live",
@@ -3707,6 +3712,8 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                                                 false,
                                             );
                                             ui.borrow_mut().stream.thinking_text.clear();
+                                        } else {
+                                            append_thinking_chip(ui, &live, &text, true);
                                         }
                                     }
                                 }
