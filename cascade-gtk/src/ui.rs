@@ -3580,6 +3580,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         }
         SessionEvent::TurnStarted => {
             set_streaming(ui, true);
+            // A new turn starts a fresh strip zone: thinking and tools for
+            // the turn land in a strip at the bottom, above its text.
+            clear_strip(ui);
             let mut u = ui.borrow_mut();
             u.stream.assistant = None;
             u.stream.thinking_body = None;
@@ -3628,6 +3631,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
         }
         SessionEvent::MessageStart { role } => {
             if role == "assistant" || role == "model" {
+                clear_strip(ui); // fresh strip zone for this message's chips
                 if ui.borrow().stream.assistant.is_none() {
                     let tv = new_view(ui);
                     attach_copy_menu(&tv, "Copy text");
@@ -3673,8 +3677,17 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     // Ordered part walk — same sequence as the replay path, so a
                     // ['thinking','text'] message renders thinking-then-prose live
                     // instead of prose with the thinking card parked after it.
+                    // The streaming view is a PLACEHOLDER: on completion it is
+                    // removed and the text parts render with real markdown —
+                    // streamed raw text must never be the final render.
+                    let stale_stream = ui.borrow_mut().stream.assistant.take();
+                    if let Some(tv) = stale_stream {
+                        let live_box = ui.borrow().live_box.clone();
+                        live_box.remove(&tv);
+                    }
+                    ui.borrow_mut().stream.pending_text.clear();
                     let live = ui.borrow().live_box.clone();
-                    let skip_text = ui.borrow().stream.assistant.is_some();
+                    let skip_text = false;
                     if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
                         for part in arr {
                             let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");

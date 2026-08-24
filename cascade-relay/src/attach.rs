@@ -82,7 +82,9 @@ impl CollabAttach {
                             SocketEvent::Control(_) => {}
                             SocketEvent::Closed { reason, will_reconnect } => {
                                 let _ = ev_tx.send(SessionEvent::Notice {
-                                    level: if will_reconnect { "warning" } else { "error" }.into(),
+                                    // Transient resets self-heal through the
+                                    // reconnect — toast, not a transcript card.
+                                    level: if will_reconnect { "info" } else { "error" }.into(),
                                     message: format!("collab: {reason}"),
                                 });
                                 if !will_reconnect {
