@@ -2895,6 +2895,10 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
         }
         UiMsg::Event(ev) => handle_event(ui, ev),
         UiMsg::Toast(t) => show_toast(ui, &t),
+        UiMsg::ReadOnly(v) => {
+            ui.borrow_mut().read_only = v;
+            sync_composer_mode(ui);
+        }
         UiMsg::Error(e) => show_toast(ui, &e),
         UiMsg::InboxCount(n) => update_inbox_badge(ui, n),
         UiMsg::InboxItems(items) => {
@@ -3121,7 +3125,14 @@ fn apply_snapshot(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
 /// local/shared attaches) or left on the server (`has_more`).
 fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
     const PAGE: usize = crate::worker::HISTORY_PAGE_U32 as usize;
+    // A tail snapshot REPLACES history — the proxy re-sends it on every
+    // re-attach, and appending stacked a full duplicate tail.
     let durable = ui.borrow().durable_box.clone();
+    {
+        let mut u = ui.borrow_mut();
+        clear_box(&u.durable_box);
+        u.current_strip = None;
+    }
     let mut msgs = snap.messages;
     {
         let mut u = ui.borrow_mut();
@@ -3379,6 +3390,10 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                 None => {
                     let tv = new_view(ui);
                     attach_copy_menu(&tv, "Copy text");
+                    // Streamed text ends the burst: tools after this text
+                    // start a fresh strip BELOW it, keeping chronological
+                    // order instead of one strip parked above the prose.
+                    clear_strip(ui);
                     let mut u = ui.borrow_mut();
                     u.live_box.append(&tv);
                     u.stream.assistant = Some(tv.clone());

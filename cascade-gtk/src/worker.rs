@@ -32,6 +32,9 @@ pub enum SessionBackend {
         /// The room's event pump — must be aborted on teardown or every
         /// re-attach stacks another duplicate renderer of the same events.
         guest_pump: Option<AbortHandle>,
+        /// The join_handle the guest channel is connected to — re-resolved
+        /// on refresh so a re-registered room reconnects instead of going stale.
+        guest_link: Option<String>,
     },
     Terminal {
         session_id: String,
@@ -220,6 +223,9 @@ pub enum UiMsg {
     Event(SessionEvent),
     Toast(String),
     Error(String),
+    /// The attached session cannot accept prompts (guest channel failed on
+    /// a discovered row) — disable the composer honestly.
+    ReadOnly(bool),
     LoggedOut,
     /// Unseen inbox entry count.
     InboxCount(usize),
@@ -492,6 +498,9 @@ pub async fn worker(
             }
             Cmd::RefreshSessions => {
                 push_sessions(&manager, cloud.as_ref(), &mut terminal_links, &ui_tx).await;
+                // The room the guest channel points at may have died and
+                // re-registered with a new id — re-resolve the handle.
+                refresh_guest_channel(cloud.as_ref(), &mut current, &ui_tx, &inbox).await;
             }
             Cmd::NewSession { kind, cwd, model } => {
                 settings.last_backend = match kind {
@@ -560,6 +569,7 @@ pub async fn worker(
                                         cmd: cmd_tx,
                                         guest_cmd: None,
                                         guest_pump: None,
+                                        guest_link: None,
                                     });
                                     pump =
                                         Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
@@ -685,10 +695,12 @@ pub async fn worker(
                             {
                                 match CollabAttach::connect(link).await {
                                     Ok((mut guest_ev, guest_tx)) => {
-                                        if let Some(SessionBackend::Cloud { guest_cmd, .. }) =
-                                            current.as_mut()
+                                        if let Some(SessionBackend::Cloud {
+                                            guest_cmd, guest_link, ..
+                                        }) = current.as_mut()
                                         {
                                             *guest_cmd = Some(guest_tx);
+                                            *guest_link = Some(link.to_string());
                                         }
                                         // The room is the live channel:
                                         // message_update deltas, early tool
@@ -713,6 +725,10 @@ pub async fn worker(
                                                 "prompt channel unavailable: {e:#}"
                                             )))
                                             .await;
+                                        // Discovered row, no live room: the
+                                        // proxy drops prompts — disable the
+                                        // composer instead of lying.
+                                        let _ = ui_tx.send(UiMsg::ReadOnly(true)).await;
                                     }
                                 }
                             }
@@ -740,6 +756,7 @@ pub async fn worker(
                                 cmd: cmd_tx,
                                 guest_cmd: None,
                                 guest_pump: None,
+                                guest_link: None,
                             });
                             pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
@@ -1083,6 +1100,55 @@ async fn push_sessions(
     }
 }
 
+/// If the attached session's join_handle changed (the room died and
+/// re-registered with a new id), reconnect the guest channel to the new
+/// room and retire the dead one.
+async fn refresh_guest_channel(
+    cloud: Option<&CloudClient>,
+    current: &mut Option<SessionBackend>,
+    ui_tx: &async_channel::Sender<UiMsg>,
+    inbox: &Inbox,
+) {
+    let Some(client) = cloud else { return };
+    let (id, current_link) = match current.as_ref() {
+        Some(SessionBackend::Cloud { session_id, guest_link, .. }) => {
+            (session_id.clone(), guest_link.clone())
+        }
+        _ => return,
+    };
+    let Ok(sessions) = client.list_sessions().await else { return };
+    let Some(meta) = sessions.iter().find(|m| m.id == id) else { return };
+    let new_link = meta.join_handle.clone().filter(|s| !s.is_empty());
+    if new_link == current_link {
+        return;
+    }
+    if let Some(SessionBackend::Cloud { guest_pump, guest_cmd, guest_link, .. }) = current.as_mut()
+    {
+        if let Some(h) = guest_pump.take() {
+            h.abort();
+        }
+        *guest_cmd = None;
+        *guest_link = None;
+    }
+    let Some(link) = new_link else { return };
+    match CollabAttach::connect(&link).await {
+        Ok((guest_ev, guest_tx)) => {
+            if let Some(SessionBackend::Cloud { guest_cmd, guest_link, guest_pump, .. }) =
+                current.as_mut()
+            {
+                *guest_cmd = Some(guest_tx);
+                *guest_link = Some(link);
+                *guest_pump = Some(spawn_broadcast_pump(guest_ev, ui_tx.clone(), inbox.clone()));
+            }
+        }
+        Err(e) => {
+            let _ = ui_tx
+                .send(UiMsg::Toast(format!("prompt channel unavailable: {e:#}")))
+                .await;
+        }
+    }
+}
+
 async fn attach_cloud(
     client: &CloudClient,
     session_id: &str,
@@ -1122,6 +1188,7 @@ async fn attach_cloud(
                 cmd: cmd_tx,
                 guest_cmd: None,
                 guest_pump: None,
+                guest_link: None,
             });
             *pump = Some(if suppress_live {
                 spawn_mpsc_pump_filtered(ev_rx, ui_tx.clone(), inbox.clone())
