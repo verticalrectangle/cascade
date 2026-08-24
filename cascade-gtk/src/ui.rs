@@ -3321,9 +3321,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                 // the transcript as bare prose (the "Wall time" soup).
                 let live = ui.borrow().live_box.clone();
                 apply_history_tool_result(ui, &live, &message);
-            } else if let Some((_, text)) = parse_agent_message(&message) {
-                if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
-                    if role == "user" || role == "human" {
+            } else if role == "user" || role == "human" {
+                if let Some((_, text)) = parse_agent_message(&message) {
+                    if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
                         let dup = {
                             let u = ui.borrow();
                             u.stream.last_user_echo.as_ref().is_some_and(|(t, when)| {
@@ -3335,44 +3335,53 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                         } else {
                             append_user_bubble_inner(ui, &text, &[], true);
                         }
-                    } else {
-                        let live = ui.borrow().live_box.clone();
-                        render_markdown_into(ui, &live, &text);
                     }
                 }
-                // Cards for toolCall/thinking parts in this message — but
-                // only when no matching card exists yet (managed sessions
-                // already built them from ToolStart events).
-                if role != "user" && role != "human" {
-                    if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
-                        for part in arr {
-                            let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                            match ty {
-                                "toolCall" => {
-                                    let id = part
-                                        .get("id")
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("");
-                                    if !id.is_empty()
-                                        && !ui
-                                            .borrow()
-                                            .current_strip
-                                            .as_ref()
-                                            .is_some_and(|s| s.has(id))
-                                    {
-                                        let live = ui.borrow().live_box.clone();
-                                        append_history_tool_call_anim(ui, &live, part, true);
+            } else {
+                // Ordered part walk — same sequence as the replay path, so a
+                // ['thinking','text'] message renders thinking-then-prose live
+                // instead of prose with the thinking card parked after it.
+                let live = ui.borrow().live_box.clone();
+                let skip_text = ui.borrow().stream.assistant.is_some();
+                if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
+                    for part in arr {
+                        let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                        match ty {
+                            "thinking" | "redactedThinking" | "reasoning" => {
+                                if let Some(text) = thinking_text(part) {
+                                    append_thinking_chip(ui, &live, &text, true);
+                                }
+                            }
+                            "toolCall" => {
+                                let id = part
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .unwrap_or("");
+                                if !id.is_empty()
+                                    && !ui
+                                        .borrow()
+                                        .current_strip
+                                        .as_ref()
+                                        .is_some_and(|s| s.has(id))
+                                {
+                                    append_history_tool_call_anim(ui, &live, part, true);
+                                }
+                            }
+                            _ => {
+                                if !skip_text {
+                                    if let Some(t) = part_plain_text(part) {
+                                        if !t.is_empty() {
+                                            render_markdown_into(ui, &live, &t);
+                                        }
                                     }
                                 }
-                                "thinking" | "redactedThinking" | "reasoning" => {
-                                    if let Some(text) = thinking_text(part) {
-                                        let live = ui.borrow().live_box.clone();
-                                        append_thinking_chip(ui, &live, &text, true);
-                                    }
-                                }
-                                _ => {}
                             }
                         }
+                    }
+                } else if !skip_text {
+                    let text = message_plain_text(&message);
+                    if !text.is_empty() {
+                        render_markdown_into(ui, &live, &text);
                     }
                 }
             }
