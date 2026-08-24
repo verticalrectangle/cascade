@@ -296,6 +296,14 @@ pub async fn worker(
     let mut pump: Option<AbortHandle> = None;
     let mut terminal_links: HashMap<String, String> = HashMap::new();
 
+    // Warm cache: paint the rail from the last list instantly; the live
+    // refresh reconciles underneath. No skeleton, no empty rail on open.
+    if let Ok(bytes) = std::fs::read(Settings::config_dir().join("sessions-cache.json")) {
+        if let Ok(cached) = serde_json::from_slice::<Vec<ListedSession>>(&bytes) {
+            let _ = ui_tx.send(UiMsg::SessionList(cached)).await;
+        }
+    }
+
     if let Some(token) = settings.token.clone() {
         match CloudClient::connect(&settings.cloud_url, &token).await {
             Ok(c) => {
@@ -685,32 +693,38 @@ pub async fn worker(
                         let has_room = join_handle
                             .as_deref()
                             .is_some_and(|s| !s.is_empty());
-                        let attached = attach_cloud(
-                            client,
-                            &id,
-                            None,
-                            read_only,
-                            has_room,
-                            &mut current,
-                            &mut pump,
-                            &ui_tx,
-                            &settings,
-                            &inbox,
-                        )
-                        .await;
+                        // Parallel attach: proxy history and the room connect
+                        // run concurrently — the transcript paints in ~0.1s
+                        // and the composer lights up when the room joins.
+                        let link_owned = join_handle.clone().filter(|s| !s.is_empty());
+                        let guest_fut = {
+                            let link = link_owned.clone();
+                            async move {
+                                match link {
+                                    Some(l) => { let r = CollabAttach::connect(&l).await; Some((l, r)) },
+                                    None => None,
+                                }
+                            }
+                        };
+                        let (attached, guest) = tokio::join!(
+                            attach_cloud(
+                                client,
+                                &id,
+                                None,
+                                read_only || has_room,
+                                has_room,
+                                &mut current,
+                                &mut pump,
+                                &ui_tx,
+                                &settings,
+                                &inbox,
+                            ),
+                            guest_fut,
+                        );
                         if attached {
-                            if let Some(link) =
-                                join_handle.as_deref().filter(|s| !s.is_empty())
-                            {
-                                match CollabAttach::connect(link).await {
-                                    Ok((mut guest_ev, guest_tx)) => {
-                                        if let Some(SessionBackend::Cloud {
-                                            guest_cmd, guest_link, ..
-                                        }) = current.as_mut()
-                                        {
-                                            *guest_cmd = Some(guest_tx);
-                                            *guest_link = Some(link.to_string());
-                                        }
+                            if let Some((link, guest_result)) = guest {
+                                match guest_result {
+                                    Ok((guest_ev, guest_tx)) => {
                                         // The room is the live channel:
                                         // message_update deltas, early tool
                                         // starts, completions. The proxy
@@ -731,11 +745,16 @@ pub async fn worker(
                                             inbox.clone(),
                                             flag,
                                         );
-                                        if let Some(SessionBackend::Cloud { guest_pump, .. }) =
-                                            current.as_mut()
+                                        if let Some(SessionBackend::Cloud {
+                                            guest_cmd, guest_link, guest_pump, ..
+                                        }) = current.as_mut()
                                         {
+                                            *guest_cmd = Some(guest_tx);
+                                            *guest_link = Some(link);
                                             *guest_pump = Some(handle);
                                         }
+                                        // Composer was parked while the room joined.
+                                        let _ = ui_tx.send(UiMsg::ReadOnly(false)).await;
                                     }
                                     Err(e) => {
                                         let _ = ui_tx
@@ -1143,6 +1162,9 @@ async fn push_sessions(
         }
     }
     list.sort_by(|a, b| b.last_active.cmp(&a.last_active));
+    if let Ok(bytes) = serde_json::to_vec(&list) {
+        let _ = std::fs::write(Settings::config_dir().join("sessions-cache.json"), bytes);
+    }
     let _ = ui_tx.send(UiMsg::SessionList(list)).await;
     // Device names for the rail (machine uuid → friendly name).
     if let Some(c) = cloud {
