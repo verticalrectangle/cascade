@@ -228,6 +228,7 @@ struct StreamState {
     thinking_body: Option<TextView>,
     pending_ui: Option<String>,
     streaming: bool,
+    thinking_text: String,
     /// Text of the last optimistically-rendered user bubble + when, used to
     /// suppress the duplicate from the MessageEnd echo of the same message.
     last_user_echo: Option<(String, std::time::Instant)>,
@@ -2146,8 +2147,33 @@ impl ToolStrip {
 
     /// A thinking block joins the burst as a muted chip — same one-line
     /// footprint as a tool, tap to read the reasoning below.
+    /// Create the thinking chip if missing, else update its text in place.
+    /// Drives the streaming-thinking chip (key "think-live") and finalizes it
+    /// on message_end without ever rendering a second chip.
+    fn upsert_thinking(&self, ui: &Rc<RefCell<Ui>>, key: &str, text: &str, animate: bool) {
+        if !self.has(key) {
+            self.add_thinking_keyed(ui, key, text, animate);
+            return;
+        }
+        let should_render = {
+            let mut st = self.state.borrow_mut();
+            if let Some(chip) = st.chips.get_mut(key) {
+                chip.result = Some(text.to_string());
+            }
+            st.open.as_deref() == Some(key)
+        };
+        if should_render {
+            self.render_expansion(ui, key);
+        }
+    }
+
     fn add_thinking(&self, ui: &Rc<RefCell<Ui>>, text: &str, animate: bool) {
         let key = format!("think-{}", self.state.borrow().chips.len());
+        self.add_thinking_keyed(ui, &key, text, animate);
+    }
+
+    fn add_thinking_keyed(&self, ui: &Rc<RefCell<Ui>>, key: &str, text: &str, animate: bool) {
+        let key = key.to_string();
         let btn = Button::new();
         btn.add_css_class("chip");
         btn.add_css_class("chip-thinking");
@@ -3329,7 +3355,17 @@ fn settle_live(ui: &Rc<RefCell<Ui>>) {
 
 fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
     match ev {
-        SessionEvent::Ready { .. } => {}
+        SessionEvent::Ready { .. } => {
+            // (Re)connect welcome: the event mapper resets and re-delivers
+            // in-flight content whole. Wipe the transient region so it
+            // renders exactly once instead of stacking on the pre-reset copy.
+            let mut u = ui.borrow_mut();
+            clear_box(&u.live_box);
+            u.stream.assistant = None;
+            u.stream.thinking_body = None;
+            u.stream.thinking_text.clear();
+            u.current_strip = None;
+        }
         SessionEvent::TurnStarted => {
             set_streaming(ui, true);
             let mut u = ui.borrow_mut();
@@ -3354,27 +3390,16 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             tv.queue_resize();
         }
         SessionEvent::ThinkingDelta { delta, .. } => {
-            let existing_body = ui.borrow().stream.thinking_body.clone();
-            let body = match existing_body {
-                Some(tv) => tv,
-                None => {
-                    let (card, body, _chev) =
-                        make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking");
-                    let mut u = ui.borrow_mut();
-                    // insert right before the assistant text if it already
-                    // exists (thinking belongs above the reply); else append.
-                    if let Some(tv) = u.stream.assistant.as_ref() {
-                        let before = tv.prev_sibling();
-                        u.live_box.insert_child_after(&card, before.as_ref());
-                    } else {
-                        u.live_box.append(&card);
-                    }
-                    u.stream.thinking_body = Some(body.clone());
-                    body
-                }
+            // Thinking streams into a live strip chip that updates in place —
+            // same design as settled thinking, no full-width streaming card.
+            let live = ui.borrow().live_box.clone();
+            let text = {
+                let mut u = ui.borrow_mut();
+                let t = u.stream.thinking_text.clone() + &delta;
+                u.stream.thinking_text = t.clone();
+                t
             };
-            let buf = body.buffer();
-            insert_tagged(&buf, &delta, "thinking");
+            strip_for(ui, &live, true).upsert_thinking(ui, "think-live", &text, true);
         }
         SessionEvent::MessageStart { role } => {
             if role == "assistant" || role == "model" {
@@ -3427,7 +3452,20 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                         match ty {
                             "thinking" | "redactedThinking" | "reasoning" => {
                                 if let Some(text) = thinking_text(part) {
-                                    append_thinking_chip(ui, &live, &text, true);
+                                    // A delta-driven live chip (if any) becomes
+                                    // the final chip — no second card for the
+                                    // same thinking block.
+                                    if ui.borrow().stream.thinking_text.is_empty() {
+                                        append_thinking_chip(ui, &live, &text, true);
+                                    } else {
+                                        strip_for(ui, &live, true).upsert_thinking(
+                                            ui,
+                                            "think-live",
+                                            &text,
+                                            false,
+                                        );
+                                        ui.borrow_mut().stream.thinking_text.clear();
+                                    }
                                 }
                             }
                             "toolCall" => {
