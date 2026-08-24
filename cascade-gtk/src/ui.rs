@@ -2135,10 +2135,12 @@ impl ToolStrip {
         } else {
             "chip-dot-done"
         });
-        let should_open = is_error || st.open.as_deref() == Some(key.as_str());
-        if should_open {
-            st.open = Some(key.clone());
+        // Errors go red and stay CLOSED — a failed tool never hijacks the
+        // transcript with a forced expansion. Tap to read the failure.
+        if is_error {
+            chip.btn.add_css_class("chip-error");
         }
+        let should_open = st.open.as_deref() == Some(key.as_str());
         drop(st);
         if should_open {
             self.render_expansion(ui, &key);
@@ -2273,17 +2275,46 @@ impl ToolStrip {
             self.expansion.append(&card);
             return;
         }
-        if !chip.args.is_empty() {
-            insert_tagged(&buf, &chip.args, "tool");
-        }
-        match &chip.result {
-            Some(r) => {
-                if !chip.args.is_empty() {
-                    insert_tagged(&buf, "\n", "tool");
-                }
-                insert_tagged(&buf, r, "tool");
+        // Compose args + result, then cap tall bodies with an expander —
+        // a giant payload can't eat the screen even when tapped open.
+        let mut full = chip.args.clone();
+        if let Some(r) = &chip.result {
+            if !full.is_empty() {
+                full.push('\n');
             }
-            None => insert_tagged(&buf, "\nrunning…", "tool"),
+            full.push_str(r);
+        } else {
+            full.push_str("\nrunning…");
+        }
+        let lines: Vec<&str> = full.lines().collect();
+        const EXPANSION_CAP: usize = 20;
+        let mut expand_btn: Option<Button> = None;
+        if lines.len() > EXPANSION_CAP {
+            insert_tagged(&buf, &lines[..EXPANSION_CAP].join("\n"), "tool");
+            let hidden = lines.len() - EXPANSION_CAP;
+            let more = Button::with_label(&format!("{hidden} more lines ▾"));
+            more.add_css_class("code-more");
+            let buf_c = buf.clone();
+            let full_c = full.clone();
+            let capped = lines[..EXPANSION_CAP].join("\n");
+            let expanded = std::cell::Cell::new(false);
+            more.connect_clicked(move |btn| {
+                let now = !expanded.get();
+                expanded.set(now);
+                buf_c.set_text("");
+                insert_tagged(&buf_c, if now { &full_c } else { &capped }, "tool");
+                btn.set_label(if now {
+                    "show less ▴"
+                } else {
+                    ""
+                });
+                if !now {
+                    btn.set_label(&format!("{hidden} more lines ▾"));
+                }
+            });
+            expand_btn = Some(more);
+        } else {
+            insert_tagged(&buf, &full, "tool");
         }
         if chip.status == ChipStatus::Error {
             card.add_css_class("advisory-error");
@@ -2293,6 +2324,9 @@ impl ToolStrip {
         // already-correct.
         card.set_visible(false);
         self.expansion.append(&card);
+        if let Some(more) = expand_btn {
+            self.expansion.append(&more);
+        }
         self.expansion.queue_resize();
         glib::idle_add_local_once(move || card.set_visible(true));
     }
@@ -2816,6 +2850,17 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
             sync_share_buttons(ui);
         }
         UiMsg::SessionList(list) => {
+            // Reconcile streaming with server truth (file freshness) — a lost
+            // agent_end can never wedge Stop/Queue again.
+            if let Some(sel) = ui.borrow().selected_id.clone() {
+                if let Some(working) = list
+                    .iter()
+                    .find(|m| m.id == sel)
+                    .and_then(|m| m.working)
+                {
+                    set_streaming(ui, working);
+                }
+            }
             ui.borrow_mut().metas = list;
             render_rail(ui);
         }
@@ -3367,6 +3412,7 @@ fn settle_live(ui: &Rc<RefCell<Ui>>) {
 fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
     match ev {
         SessionEvent::Ready { .. } => {
+            set_streaming(ui, false);
             // (Re)connect welcome: the event mapper resets and re-delivers
             // in-flight content whole. Wipe the transient region so it
             // renders exactly once instead of stacking on the pre-reset copy.

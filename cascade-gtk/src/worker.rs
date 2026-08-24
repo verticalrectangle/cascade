@@ -35,6 +35,11 @@ pub enum SessionBackend {
         /// The join_handle the guest channel is connected to — re-resolved
         /// on refresh so a re-registered room reconnects instead of going stale.
         guest_link: Option<String>,
+        /// True while the room's event stream is alive. The proxy pump
+        /// suppresses its live events ONLY while this is set — if the guest
+        /// dies, the tailer resumes feeding live content instead of the app
+        /// going blind.
+        guest_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
     },
     Terminal {
         session_id: String,
@@ -570,6 +575,7 @@ pub async fn worker(
                                         guest_cmd: None,
                                         guest_pump: None,
                                         guest_link: None,
+                                        guest_live: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                                     });
                                     pump =
                                         Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
@@ -708,10 +714,19 @@ pub async fn worker(
                                         // keeps history (snapshot pages);
                                         // its live events are filtered out
                                         // at attach so nothing double-renders.
-                                        let handle = spawn_broadcast_pump(
+                                        let flag = match current.as_ref() {
+                                            Some(SessionBackend::Cloud { guest_live, .. }) => {
+                                                guest_live.clone()
+                                            }
+                                            _ => std::sync::Arc::new(
+                                                std::sync::atomic::AtomicBool::new(false),
+                                            ),
+                                        };
+                                        let handle = spawn_guest_pump(
                                             guest_ev,
                                             ui_tx.clone(),
                                             inbox.clone(),
+                                            flag,
                                         );
                                         if let Some(SessionBackend::Cloud { guest_pump, .. }) =
                                             current.as_mut()
@@ -757,6 +772,7 @@ pub async fn worker(
                                 guest_cmd: None,
                                 guest_pump: None,
                                 guest_link: None,
+                                guest_live: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
                             });
                             pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
@@ -951,6 +967,33 @@ async fn send_pane_url(settings: &Settings, id: &str, ui_tx: &async_channel::Sen
         .await;
 }
 
+/// Guest-channel pump: same as broadcast pump but clears the liveness flag
+/// when the room stream ends, un-filtering the proxy so the tailer resumes.
+fn spawn_guest_pump(
+    mut rx: tokio::sync::broadcast::Receiver<SessionEvent>,
+    ui_tx: async_channel::Sender<UiMsg>,
+    inbox: Inbox,
+    flag: std::sync::Arc<std::sync::atomic::AtomicBool>,
+) -> AbortHandle {
+    flag.store(true, std::sync::atomic::Ordering::Relaxed);
+    tokio::spawn(async move {
+        loop {
+            match rx.recv().await {
+                Ok(ev) => {
+                    pump_inbox(&ev, &inbox, &ui_tx);
+                    if ui_tx.send(UiMsg::Event(ev)).await.is_err() {
+                        break;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            }
+        }
+        flag.store(false, std::sync::atomic::Ordering::Relaxed);
+    })
+    .abort_handle()
+}
+
 fn spawn_broadcast_pump(
     mut rx: tokio::sync::broadcast::Receiver<SessionEvent>,
     ui_tx: async_channel::Sender<UiMsg>,
@@ -973,21 +1016,25 @@ fn spawn_broadcast_pump(
     .abort_handle()
 }
 
-/// Dual-channel variant: only history + lifecycle events pass; live content
-/// (deltas, message completions, tool events) arrives via the collab room.
-fn spawn_mpsc_pump_filtered(
+/// Dual-channel variant: live events are suppressed ONLY while the guest
+/// channel is alive (`suppress` set). Guest dies → flag clears → the tailer
+/// resumes feeding live content instead of the app going blind.
+fn spawn_mpsc_pump_dynamic(
     mut rx: mpsc::UnboundedReceiver<SessionEvent>,
     ui_tx: async_channel::Sender<UiMsg>,
     inbox: Inbox,
+    suppress: bool,
+    guest_live: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> AbortHandle {
     tokio::spawn(async move {
         while let Some(ev) = rx.recv().await {
-            let keep = matches!(
-                ev,
-                SessionEvent::Snapshot(_)
-                    | SessionEvent::StateChanged
-                    | SessionEvent::ProcessExited { .. }
-            );
+            let keep = !(suppress && guest_live.load(std::sync::atomic::Ordering::Relaxed))
+                || matches!(
+                    ev,
+                    SessionEvent::Snapshot(_)
+                        | SessionEvent::StateChanged
+                        | SessionEvent::ProcessExited { .. }
+                );
             if !keep {
                 continue;
             }
@@ -1133,12 +1180,13 @@ async fn refresh_guest_channel(
     let Some(link) = new_link else { return };
     match CollabAttach::connect(&link).await {
         Ok((guest_ev, guest_tx)) => {
-            if let Some(SessionBackend::Cloud { guest_cmd, guest_link, guest_pump, .. }) =
+            if let Some(SessionBackend::Cloud { guest_cmd, guest_link, guest_pump, guest_live, .. }) =
                 current.as_mut()
             {
                 *guest_cmd = Some(guest_tx);
                 *guest_link = Some(link);
-                *guest_pump = Some(spawn_broadcast_pump(guest_ev, ui_tx.clone(), inbox.clone()));
+                let flag = guest_live.clone();
+                *guest_pump = Some(spawn_guest_pump(guest_ev, ui_tx.clone(), inbox.clone(), flag));
             }
         }
         Err(e) => {
@@ -1183,18 +1231,23 @@ async fn attach_cloud(
                     h.abort();
                 }
             }
+            let guest_live = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let pump_flag = guest_live.clone();
             *current = Some(SessionBackend::Cloud {
                 session_id: session_id.to_string(),
                 cmd: cmd_tx,
                 guest_cmd: None,
                 guest_pump: None,
                 guest_link: None,
+                guest_live,
             });
-            *pump = Some(if suppress_live {
-                spawn_mpsc_pump_filtered(ev_rx, ui_tx.clone(), inbox.clone())
-            } else {
-                spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone())
-            });
+            *pump = Some(spawn_mpsc_pump_dynamic(
+                ev_rx,
+                ui_tx.clone(),
+                inbox.clone(),
+                suppress_live,
+                pump_flag,
+            ));
             let _ = ui_tx
                 .send(UiMsg::Attached {
                     id: session_id.to_string(),

@@ -974,3 +974,6 @@ selection {
   background: transparent;
 }
 .code-more:hover { color: #E0DEF4; background-color: rgba(224, 222, 244, 0.06); }
+
+/* error chip — failed tool, closed by default */
+.chip-error { border-color: rgba(235, 111, 146, 0.55); background-color: rgba(235, 111, 146, 0.1); }
