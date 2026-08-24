@@ -3,6 +3,7 @@
  * and register the session with cascaded so the GTK client can join.
  */
 import * as os from "node:os";
+import * as fs from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 
@@ -461,6 +462,82 @@ export default function (pi: ExtensionAPI): void {
 		});
 	};
 
+
+	/** Token for terminal registration: env first, then the durable file
+	 * (~/.config/cascade/terminal_token) so TUIs launched before the env var
+	 * existed still register once the file lands. */
+	function resolveToken(): string {
+		const fromEnv = (process.env.CASCADE_TOKEN ?? "").trim();
+		if (fromEnv) return fromEnv;
+		try {
+			return fs.readFileSync(`${os.homedir()}/.config/cascade/terminal_token`, "utf8").trim();
+		} catch {
+			return "";
+		}
+	}
+
+	let registrationTimer: ReturnType<typeof setInterval> | null = null;
+	function clearRegistrationTimer() {
+		if (registrationTimer !== null) {
+			clearInterval(registrationTimer);
+			registrationTimer = null;
+		}
+	}
+
+	async function attemptRegistration(ctx: ExtensionContext) {
+		if (registeredSessionId) return;
+		cascadeToken = resolveToken();
+		if (!cascadeToken) {
+			if (!missingTokenLogged) {
+				missingTokenLogged = true;
+				log.warn("cascade-omp-plugin: CASCADE_TOKEN unset and no token file; will retry registration");
+			}
+			return;
+		}
+		cascadeUrl = (process.env.CASCADE_URL ?? DEFAULT_CASCADE_URL).trim() || DEFAULT_CASCADE_URL;
+		const relay = (process.env.CASCADE_RELAY ?? DEFAULT_RELAY).trim() || DEFAULT_RELAY;
+		shuttingDown = false;
+		peers.clear();
+
+		const rawKey = randomBytes(ROOM_KEY_BYTES);
+		const writeToken = randomBytes(WRITE_TOKEN_BYTES);
+		const roomId = b64url(randomBytes(ROOM_ID_BYTES));
+		const origin = relayOrigin(relay);
+		const wsUrl = `${origin}/r/${roomId}`;
+		const cryptoKey = await importRoomKey(rawKey);
+		const next = new MiniCollabHost({
+			wsUrl,
+			joinHandle: formatCollabLink(relay, roomId, rawKey, writeToken),
+			viewHandle: formatCollabLink(relay, roomId, rawKey),
+			key: cryptoKey,
+			writeToken,
+			onFrame: handleGuestFrame,
+			log,
+		});
+		host = next;
+		await next.connect();
+		if (shuttingDown || host !== next) return;
+
+		const sessionId = ctx.sessionManager.getSessionId() || `pid-${process.pid}-${Date.now()}`;
+		registeredSessionId = sessionId;
+		await registerTerminal(
+			cascadeUrl,
+			cascadeToken,
+			{
+				machine: os.hostname(),
+				session_id: sessionId,
+				join_handle: next.joinHandle,
+				view_handle: next.viewHandle,
+				cwd: ctx.cwd,
+				title: pi.getSessionName(),
+				pid: process.pid,
+			},
+			log,
+		);
+		clearRegistrationTimer();
+		log.info("cascade-omp-plugin: registered terminal", { sessionId, relay: origin });
+	}
+
 	pi.on("session_start", (_event, ctx) => {
 		safe("session_start", async () => {
 			// Register interactive TUI sessions and harness/rpc main sessions alike.
@@ -471,56 +548,17 @@ export default function (pi: ExtensionAPI): void {
 				log.debug("cascade-omp-plugin: CASCADE_DISABLE set; skipping");
 				return;
 			}
-			cascadeToken = (process.env.CASCADE_TOKEN ?? "").trim();
-			if (!cascadeToken) {
-				if (!missingTokenLogged) {
-					missingTokenLogged = true;
-					log.warn("cascade-omp-plugin: CASCADE_TOKEN unset; not registering this terminal");
-				}
-				return;
-			}
-			cascadeUrl = (process.env.CASCADE_URL ?? DEFAULT_CASCADE_URL).trim() || DEFAULT_CASCADE_URL;
-			const relay = (process.env.CASCADE_RELAY ?? DEFAULT_RELAY).trim() || DEFAULT_RELAY;
 			lastCtx = ctx;
-			shuttingDown = false;
-			peers.clear();
-
-			const rawKey = randomBytes(ROOM_KEY_BYTES);
-			const writeToken = randomBytes(WRITE_TOKEN_BYTES);
-			const roomId = b64url(randomBytes(ROOM_ID_BYTES));
-			const origin = relayOrigin(relay);
-			const wsUrl = `${origin}/r/${roomId}`;
-			const cryptoKey = await importRoomKey(rawKey);
-			const next = new MiniCollabHost({
-				wsUrl,
-				joinHandle: formatCollabLink(relay, roomId, rawKey, writeToken),
-				viewHandle: formatCollabLink(relay, roomId, rawKey),
-				key: cryptoKey,
-				writeToken,
-				onFrame: handleGuestFrame,
-				log,
-			});
-			host = next;
-			await next.connect();
-			if (shuttingDown || host !== next) return;
-
-			const sessionId = ctx.sessionManager.getSessionId() || `pid-${process.pid}-${Date.now()}`;
-			registeredSessionId = sessionId;
-			await registerTerminal(
-				cascadeUrl,
-				cascadeToken,
-				{
-					machine: os.hostname(),
-					session_id: sessionId,
-					join_handle: next.joinHandle,
-					view_handle: next.viewHandle,
-					cwd: ctx.cwd,
-					title: pi.getSessionName(),
-					pid: process.pid,
-				},
-				log,
-			);
-			log.info("cascade-omp-plugin: registered terminal", { sessionId, relay: origin });
+			await attemptRegistration(ctx);
+			// Missing token (or a failed attempt) must not be fatal: retry
+			// until the token file or env shows up.
+			if (!registeredSessionId && registrationTimer === null) {
+				registrationTimer = setInterval(() => {
+					if (!lastCtx) return;
+					safe("registration retry", () => attemptRegistration(lastCtx!));
+				}, 30_000);
+				registrationTimer.unref();
+			}
 		});
 	});
 
@@ -536,6 +574,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_shutdown", (_event, ctx) => {
 		safe("session_shutdown", async () => {
 			shuttingDown = true;
+			clearRegistrationTimer();
 			const sessionId = registeredSessionId ?? ctx.sessionManager.getSessionId();
 			if (sessionId && cascadeToken) {
 				await unregisterTerminal(cascadeUrl, cascadeToken, sessionId, log);
