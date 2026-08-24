@@ -959,3 +959,7 @@ selection {
 .chip-name { font-size: 9px; font-weight: 700; letter-spacing: 0.6px; }
 .chip-intent { font-size: 10px; color: #908CAA; }
 @keyframes chip-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }
+
+/* thinking chip — muted inline reasoning marker */
+.chip-thinking { background-color: rgba(224, 222, 244, 0.04); border-style: dashed; }
+.chip-thinking-name { font-style: italic; font-weight: 500; text-transform: none; letter-spacing: 0; color: #908CAA; }

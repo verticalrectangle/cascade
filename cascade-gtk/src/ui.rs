@@ -1946,6 +1946,7 @@ struct Chip {
     args: String,
     result: Option<String>,
     status: ChipStatus,
+    is_thinking: bool,
 }
 
 #[derive(Default)]
@@ -2041,6 +2042,7 @@ impl ToolStrip {
                 args: args.to_string(),
                 result: None,
                 status: ChipStatus::Running,
+                is_thinking: false,
             },
         );
         if animate {
@@ -2084,6 +2086,48 @@ impl ToolStrip {
         drop(st);
         if should_open {
             self.render_expansion(ui, &key);
+        }
+    }
+
+    /// A thinking block joins the burst as a muted chip — same one-line
+    /// footprint as a tool, tap to read the reasoning below.
+    fn add_thinking(&self, ui: &Rc<RefCell<Ui>>, text: &str, animate: bool) {
+        let key = format!("think-{}", self.state.borrow().chips.len());
+        let btn = Button::new();
+        btn.add_css_class("chip");
+        btn.add_css_class("chip-thinking");
+        if animate {
+            btn.add_css_class("chip-enter");
+        }
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        let name_l = Label::new(Some("thinking"));
+        name_l.add_css_class("chip-name");
+        name_l.add_css_class("chip-thinking-name");
+        row.append(&name_l);
+        btn.set_child(Some(&row));
+        let strip = self.clone();
+        let ui2 = ui.clone();
+        let key2 = key.clone();
+        btn.connect_clicked(move |_| strip.toggle_open(&ui2, &key2));
+        self.chips_box.append(&btn);
+        self.state.borrow_mut().chips.insert(
+            key,
+            Chip {
+                btn: btn.clone(),
+                dot: Label::new(None),
+                name: "THINKING".to_string(),
+                intent: String::new(),
+                args: String::new(),
+                result: Some(text.to_string()),
+                status: ChipStatus::Done,
+                is_thinking: true,
+            },
+        );
+        if animate {
+            glib::idle_add_local_once(move || {
+                btn.remove_css_class("chip-enter");
+                btn.add_css_class("chip-in");
+            });
         }
     }
 
@@ -2131,9 +2175,19 @@ impl ToolStrip {
         } else {
             format!("· {}", chip.intent)
         };
-        let (card, body, _chev) =
-            make_tool_card(ui, "tool-tool-use", &chip.name.to_uppercase(), &meta, "tool");
+        let (card, body, _chev) = if chip.is_thinking {
+            make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking")
+        } else {
+            make_tool_card(ui, "tool-tool-use", &chip.name.to_uppercase(), &meta, "tool")
+        };
         let buf = body.buffer();
+        if chip.is_thinking {
+            if let Some(r) = &chip.result {
+                insert_tagged(&buf, r, "thinking");
+            }
+            self.expansion.append(&card);
+            return;
+        }
         if !chip.args.is_empty() {
             insert_tagged(&buf, &chip.args, "tool");
         }
@@ -2895,14 +2949,11 @@ fn append_history_tool_call_anim(
 }
 
 fn append_history_thinking(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, text: &str) {
-    clear_strip(ui);
-    let (card, body, chevron) =
-        make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking");
-    insert_tagged(&body.buffer(), text, "thinking");
-    body.set_visible(false);
-    chevron.set_text("▸");
-    card.add_css_class("collapsed");
-    parent.append(&card);
+    append_thinking_chip(ui, parent, text, false);
+}
+
+fn append_thinking_chip(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, text: &str, animate: bool) {
+    strip_for(ui, parent, animate).add_thinking(ui, text, animate);
 }
 
 fn apply_history_tool_result(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_json::Value) {
@@ -3300,7 +3351,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                                 "thinking" | "redactedThinking" | "reasoning" => {
                                     if let Some(text) = thinking_text(part) {
                                         let live = ui.borrow().live_box.clone();
-                                        append_history_thinking(ui, &live, &text);
+                                        append_thinking_chip(ui, &live, &text, true);
                                     }
                                 }
                                 _ => {}
