@@ -1860,11 +1860,11 @@ fn append_user_bubble(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf]) {
 /// Optimistic render at send time; MessageEnd(user) echoes the same message
 /// back — skip the duplicate.
 fn append_user_bubble_inner(ui: &Rc<RefCell<Ui>>, text: &str, images: &[PathBuf], from_echo: bool) {
-    let target = if ui.borrow().stream.streaming {
-        ui.borrow().live_box.clone()
-    } else {
-        ui.borrow().durable_box.clone()
-    };
+    // Always the live tail. Discovered sessions never settle (no turn
+    // lifecycle events), so the durable-box branch dropped bubbles in the
+    // middle of the transcript — right after the previous user message —
+    // while the turn's work rendered below in live_box.
+    let target = ui.borrow().live_box.clone();
     user_bubble_into(ui, &target, text, images, from_echo);
 }
 
@@ -2443,7 +2443,9 @@ fn paste_image(ui: &Rc<RefCell<Ui>>) -> bool {
 // ── rail rendering ───────────────────────────────────────────────────
 
 fn meta_kind(m: &ListedSession) -> BackendKind {
-    if m.kind == "terminal" {
+    // A join_handle means a live collab room — attach there regardless of
+    // origin so the composer can actually prompt the session.
+    if m.kind == "terminal" || m.join_handle.is_some() {
         BackendKind::Terminal
     } else if m.machine == "cloud" || m.machine.is_empty() {
         BackendKind::Cloud

@@ -323,6 +323,17 @@ pub async fn list_sessions(
         let created = chrono::DateTime::parse_from_rfc3339(&t.created_at)
             .map(|d| d.with_timezone(&chrono::Utc))
             .unwrap_or_else(|_| chrono::Utc::now());
+        // The same live session can surface twice: file-watch discovery AND
+        // the omp plugin's terminal registration. Merge handles onto the
+        // existing row — one row, promptable.
+        if let Some(row) = out.iter_mut().find(|r| r.id == t.session_id) {
+            row.kind = "terminal".into();
+            row.join_handle = Some(t.join_handle);
+            row.view_handle = Some(t.view_handle);
+            row.pid = t.pid;
+            row.live = Some(true);
+            continue;
+        }
         out.push(ListedSession {
             id: t.session_id,
             omp_session_id: None,
