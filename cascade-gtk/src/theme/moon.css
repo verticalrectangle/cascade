@@ -937,3 +937,25 @@ selection {
 .lightbox {
   background-color: rgba(21, 20, 36, 0.92);
 }
+
+/* ── tool strip chips ─────────────────────────────────────────────── */
+.tool-strip { margin: 2px 0 6px 0; }
+.tool-strip-scroll { min-height: 30px; }
+.chip {
+  border-radius: 14px;
+  padding: 4px 11px;
+  background-color: rgba(224, 222, 244, 0.08);
+  border: 1px solid rgba(224, 222, 244, 0.14);
+  color: #E0DEF4;
+  transition: opacity 180ms ease-out, margin-left 180ms ease-out;
+}
+.chip:hover { background-color: rgba(224, 222, 244, 0.14); }
+.chip-enter { opacity: 0; margin-left: 22px; }
+.chip-in { opacity: 1; margin-left: 0; }
+.chip-dot { font-size: 8px; }
+.chip-dot-running { color: #F6C177; animation: chip-pulse 1.1s ease-in-out infinite; }
+.chip-dot-done { color: #9CCFD8; }
+.chip-dot-error { color: #EB6F92; }
+.chip-name { font-size: 9px; font-weight: 700; letter-spacing: 0.6px; }
+.chip-intent { font-size: 10px; color: #908CAA; }
+@keyframes chip-pulse { 0%, 100% { opacity: 0.3; } 50% { opacity: 1; } }

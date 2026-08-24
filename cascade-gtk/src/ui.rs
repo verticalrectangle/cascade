@@ -222,16 +222,10 @@ fn style_buffer(buf: &TextBuffer, theme: &str) {
 
 // ── state ────────────────────────────────────────────────────────────
 
-struct ToolCard {
-    body: TextView,
-    container: GtkBox,
-}
-
 #[derive(Default)]
 struct StreamState {
     assistant: Option<TextView>,
     thinking_body: Option<TextView>,
-    tools: HashMap<String, ToolCard>,
     pending_ui: Option<String>,
     streaming: bool,
     /// Text of the last optimistically-rendered user bubble + when, used to
@@ -307,6 +301,7 @@ pub struct Ui {
     live_box: GtkBox,
     follow: Cell<bool>,
     programmatic: Cell<bool>,
+    current_strip: Option<ToolStrip>,
     // transcript history paging (tail-first render, older pages prepend)
     history: VecDeque<serde_json::Value>,
     history_oldest_rendered: u64,
@@ -834,6 +829,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         live_box,
         follow: Cell::new(true),
         programmatic: Cell::new(false),
+        current_strip: None,
         history: VecDeque::new(),
         history_oldest_rendered: 0,
         history_server_more: false,
@@ -1685,6 +1681,7 @@ fn attach_copy_menu(view: &TextView, label: &str) {
 
 /// Render one assistant markdown body into `parent` (durable or live box).
 fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
+    clear_strip(ui); // prose closes the current tool burst
     if body.contains("Wall time") {
     }
     for block in markdown::parse_blocks(body) {
@@ -1880,6 +1877,7 @@ fn user_bubble_into(
     images: &[PathBuf],
     from_echo: bool,
 ) {
+    clear_strip(ui);
     if !from_echo {
         ui.borrow_mut().stream.last_user_echo =
             Some((text.to_string(), std::time::Instant::now()));
@@ -1929,6 +1927,250 @@ fn show_lightbox(ui: &Rc<RefCell<Ui>>, texture: &gdk::Texture) {
 }
 
 /// Collapsible tool/thinking card.
+// ── tool strip ───────────────────────────────────────────────────────
+// One horizontal row of compact chips per contiguous burst of tool calls.
+// Chips fly in live; tapping one expands the full card inline below.
+
+#[derive(Clone, Copy, PartialEq)]
+enum ChipStatus {
+    Running,
+    Done,
+    Error,
+}
+
+struct Chip {
+    btn: Button,
+    dot: Label,
+    name: String,
+    intent: String,
+    args: String,
+    result: Option<String>,
+    status: ChipStatus,
+}
+
+#[derive(Default)]
+struct StripState {
+    chips: HashMap<String, Chip>,
+    open: Option<String>,
+}
+
+#[derive(Clone)]
+struct ToolStrip {
+    state: Rc<RefCell<StripState>>,
+    chips_box: GtkBox,
+    expansion: GtkBox,
+}
+
+impl ToolStrip {
+    fn new(parent: &GtkBox) -> Self {
+        let container = GtkBox::new(Orientation::Vertical, 4);
+        container.add_css_class("tool-strip");
+        let scroll = ScrolledWindow::new();
+        scroll.add_css_class("tool-strip-scroll");
+        scroll.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
+        scroll.set_vscrollbar_policy(gtk4::PolicyType::Never);
+        scroll.set_propagate_natural_height(true);
+        let chips_box = GtkBox::new(Orientation::Horizontal, 6);
+        chips_box.add_css_class("tool-chips");
+        scroll.set_child(Some(&chips_box));
+        container.append(&scroll);
+        let expansion = GtkBox::new(Orientation::Vertical, 4);
+        container.append(&expansion);
+        parent.append(&container);
+        Self {
+            state: Rc::new(RefCell::new(StripState::default())),
+            chips_box,
+            expansion,
+        }
+    }
+
+    fn has(&self, id: &str) -> bool {
+        !id.is_empty() && self.state.borrow().chips.contains_key(id)
+    }
+
+    fn add_call(
+        &self,
+        ui: &Rc<RefCell<Ui>>,
+        id: &str,
+        name: &str,
+        intent: &str,
+        args: &str,
+        animate: bool,
+    ) {
+        if self.has(id) {
+            return;
+        }
+        let key = if id.is_empty() {
+            format!("anon-{}", self.state.borrow().chips.len())
+        } else {
+            id.to_string()
+        };
+        let btn = Button::new();
+        btn.add_css_class("chip");
+        if animate {
+            btn.add_css_class("chip-enter");
+        }
+        let row = GtkBox::new(Orientation::Horizontal, 6);
+        let dot = Label::new(Some("●"));
+        dot.add_css_class("chip-dot");
+        dot.add_css_class("chip-dot-running");
+        row.append(&dot);
+        let name_l = Label::new(Some(&name.to_uppercase()));
+        name_l.add_css_class("chip-name");
+        row.append(&name_l);
+        if !intent.is_empty() {
+            let intent_l = Label::new(Some(intent));
+            intent_l.add_css_class("chip-intent");
+            intent_l.set_ellipsize(pango::EllipsizeMode::End);
+            intent_l.set_max_width_chars(30);
+            row.append(&intent_l);
+        }
+        btn.set_child(Some(&row));
+        let strip = self.clone();
+        let ui2 = ui.clone();
+        let key2 = key.clone();
+        btn.connect_clicked(move |_| strip.toggle_open(&ui2, &key2));
+        self.chips_box.append(&btn);
+        self.state.borrow_mut().chips.insert(
+            key,
+            Chip {
+                btn: btn.clone(),
+                dot,
+                name: name.to_string(),
+                intent: intent.to_string(),
+                args: args.to_string(),
+                result: None,
+                status: ChipStatus::Running,
+            },
+        );
+        if animate {
+            glib::idle_add_local_once(move || {
+                btn.remove_css_class("chip-enter");
+                btn.add_css_class("chip-in");
+            });
+        }
+    }
+
+    fn add_result(
+        &self,
+        ui: &Rc<RefCell<Ui>>,
+        id: &str,
+        name: &str,
+        result: &str,
+        is_error: bool,
+    ) {
+        if !self.has(id) {
+            self.add_call(ui, id, name, "", "", false);
+        }
+        let key = self.resolve_key(id);
+        let mut st = self.state.borrow_mut();
+        let Some(chip) = st.chips.get_mut(&key) else { return };
+        chip.result = Some(result.to_string());
+        chip.status = if is_error {
+            ChipStatus::Error
+        } else {
+            ChipStatus::Done
+        };
+        chip.dot.remove_css_class("chip-dot-running");
+        chip.dot.add_css_class(if is_error {
+            "chip-dot-error"
+        } else {
+            "chip-dot-done"
+        });
+        let should_open = is_error || st.open.as_deref() == Some(key.as_str());
+        if should_open {
+            st.open = Some(key.clone());
+        }
+        drop(st);
+        if should_open {
+            self.render_expansion(ui, &key);
+        }
+    }
+
+    fn set_partial(&self, id: &str, partial: &str) {
+        let key = self.resolve_key(id);
+        if let Some(chip) = self.state.borrow_mut().chips.get_mut(&key) {
+            chip.result = Some(partial.to_string());
+        }
+    }
+
+    fn resolve_key(&self, id: &str) -> String {
+        if !id.is_empty() && self.has(id) {
+            return id.to_string();
+        }
+        // Anonymous chips created for id-less calls: results without ids
+        // land on the most recent chip.
+        self.state
+            .borrow()
+            .chips
+            .keys()
+            .last()
+            .cloned()
+            .unwrap_or_else(|| id.to_string())
+    }
+
+    fn toggle_open(&self, ui: &Rc<RefCell<Ui>>, id: &str) {
+        let mut st = self.state.borrow_mut();
+        if st.open.as_deref() == Some(id) {
+            st.open = None;
+            drop(st);
+            clear_box(&self.expansion);
+        } else {
+            st.open = Some(id.to_string());
+            drop(st);
+            self.render_expansion(ui, id);
+        }
+    }
+
+    fn render_expansion(&self, ui: &Rc<RefCell<Ui>>, id: &str) {
+        clear_box(&self.expansion);
+        let st = self.state.borrow();
+        let Some(chip) = st.chips.get(id) else { return };
+        let meta = if chip.intent.is_empty() {
+            String::new()
+        } else {
+            format!("· {}", chip.intent)
+        };
+        let (card, body, _chev) =
+            make_tool_card(ui, "tool-tool-use", &chip.name.to_uppercase(), &meta, "tool");
+        let buf = body.buffer();
+        if !chip.args.is_empty() {
+            insert_tagged(&buf, &chip.args, "tool");
+        }
+        match &chip.result {
+            Some(r) => {
+                if !chip.args.is_empty() {
+                    insert_tagged(&buf, "\n", "tool");
+                }
+                insert_tagged(&buf, r, "tool");
+            }
+            None => insert_tagged(&buf, "\nrunning…", "tool"),
+        }
+        if chip.status == ChipStatus::Error {
+            card.add_css_class("advisory-error");
+        }
+        self.expansion.append(&card);
+    }
+}
+
+/// Get or create the active strip for a parent container. A new burst gets
+/// a new strip; `clear_strip` on non-tool content closes the burst.
+fn strip_for(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, animate: bool) -> ToolStrip {
+    let mut u = ui.borrow_mut();
+    if let Some(strip) = &u.current_strip {
+        return strip.clone();
+    }
+    let strip = ToolStrip::new(parent);
+    u.current_strip = Some(strip.clone());
+    // Chips animate only on the live path; replay renders them settled.
+    let _ = animate;
+    strip
+}
+
+fn clear_strip(ui: &Rc<RefCell<Ui>>) {
+    ui.borrow_mut().current_strip = None;
+}
+
 fn make_tool_card(
     ui: &Rc<RefCell<Ui>>,
     kind_class: &str,
@@ -1982,6 +2224,7 @@ fn make_tool_card(
 }
 
 fn append_advisory(ui: &Rc<RefCell<Ui>>, level: &str, message: &str) {
+    clear_strip(ui);
     let card = GtkBox::new(Orientation::Vertical, 4);
     card.add_css_class("advisory-card");
     card.add_css_class(if level == "error" {
@@ -2631,32 +2874,28 @@ fn fill_tool_result(
 }
 
 fn append_history_tool_call(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, part: &serde_json::Value) {
+    append_history_tool_call_anim(ui, parent, part, false);
+}
+
+fn append_history_tool_call_anim(
+    ui: &Rc<RefCell<Ui>>,
+    parent: &GtkBox,
+    part: &serde_json::Value,
+    animate: bool,
+) {
     let name = str_field(part, &["name", "toolName"]).unwrap_or("tool");
     let id = str_field(part, &["id", "toolCallId"]).unwrap_or("");
-    let meta = str_field(part, &["intent"])
-        .map(|i| format!("· {i}"))
-        .unwrap_or_default();
+    let intent = str_field(part, &["intent"]).unwrap_or("");
     let args_text = part
         .get("arguments")
         .or_else(|| part.get("args"))
         .map(json_pretty)
         .unwrap_or_default();
-    let (card, body, _chev) =
-        make_tool_card(ui, "tool-tool-use", &name.to_uppercase(), &meta, "tool");
-    insert_tagged(&body.buffer(), &args_text, "tool");
-    parent.append(&card);
-    if !id.is_empty() {
-        ui.borrow_mut().stream.tools.insert(
-            id.to_string(),
-            ToolCard {
-                body,
-                container: card,
-            },
-        );
-    }
+    strip_for(ui, parent, animate).add_call(ui, id, name, intent, &args_text, animate);
 }
 
 fn append_history_thinking(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, text: &str) {
+    clear_strip(ui);
     let (card, body, chevron) =
         make_tool_card(ui, "tool-thinking", "THINKING", "", "thinking");
     insert_tagged(&body.buffer(), text, "thinking");
@@ -2675,42 +2914,10 @@ fn apply_history_tool_result(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_
         .and_then(|v| v.as_bool())
         .unwrap_or(false);
     let body_text = msg.get("content").map(content_display).unwrap_or_default();
-
-    let existing = if !call_id.is_empty() {
-        ui.borrow()
-            .stream
-            .tools
-            .get(call_id)
-            .map(|c| (c.body.clone(), c.container.clone()))
-    } else {
-        None
-    };
-
-    if let Some((body, container)) = existing {
-        if body_text.is_empty() && !is_error {
-            return;
-        }
-        fill_tool_result(&body, &container, tool_name, &body_text, is_error);
-        return;
-    }
-
     if body_text.is_empty() && !is_error {
         return;
     }
-
-    let (card, body, _chev) =
-        make_tool_card(ui, "tool-tool-use", &tool_name.to_uppercase(), "", "tool");
-    fill_tool_result(&body, &card, tool_name, &body_text, is_error);
-    parent.append(&card);
-    if !call_id.is_empty() {
-        ui.borrow_mut().stream.tools.insert(
-            call_id.to_string(),
-            ToolCard {
-                body,
-                container: card,
-            },
-        );
-    }
+    strip_for(ui, parent, false).add_result(ui, call_id, tool_name, &body_text, is_error);
 }
 
 fn render_history_part(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, part: &serde_json::Value) {
@@ -2769,7 +2976,7 @@ fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
         u.history_server_more = snap.has_more;
         u.history_has_content = !msgs.is_empty() || !u.history.is_empty();
         u.follow.set(true);
-        u.stream.tools.clear();
+        u.current_strip = None;
     }
     for msg in msgs {
         render_history_message(ui, &durable, &msg);
@@ -2971,7 +3178,7 @@ fn settle_live(ui: &Rc<RefCell<Ui>>) {
     }
     u.stream.assistant = None;
     u.stream.thinking_body = None;
-    u.stream.tools.clear();
+    u.current_strip = None;
     clear_box(&u.queue_strip);
     u.queue_strip.set_visible(false);
 }
@@ -3080,10 +3287,14 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("");
                                     if !id.is_empty()
-                                        && !ui.borrow().stream.tools.contains_key(id)
+                                        && !ui
+                                            .borrow()
+                                            .current_strip
+                                            .as_ref()
+                                            .is_some_and(|s| s.has(id))
                                     {
                                         let live = ui.borrow().live_box.clone();
-                                        append_history_tool_call(ui, &live, part);
+                                        append_history_tool_call_anim(ui, &live, part, true);
                                     }
                                 }
                                 "thinking" | "redactedThinking" | "reasoning" => {
@@ -3107,38 +3318,24 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             args,
             intent,
         } => {
-            let meta = intent.as_deref().map(|i| format!("· {i}")).unwrap_or_default();
-            let (card, body, _chevron) =
-                make_tool_card(ui, "tool-tool-use", &tool_name.to_uppercase(), &meta, "tool");
-            {
-                let buf = body.buffer();
-                insert_tagged(
-                    &buf,
-                    &serde_json::to_string_pretty(&args).unwrap_or_default(),
-                    "tool",
-                );
-            }
-            ui.borrow().live_box.append(&card);
-            ui.borrow_mut().stream.tools.insert(
-                tool_call_id,
-                ToolCard {
-                    body,
-                    container: card,
-                },
+            let live = ui.borrow().live_box.clone();
+            let args_text = serde_json::to_string_pretty(&args).unwrap_or_default();
+            strip_for(ui, &live, true).add_call(
+                ui,
+                &tool_call_id,
+                &tool_name,
+                intent.as_deref().unwrap_or(""),
+                &args_text,
+                true,
             );
         }
         SessionEvent::ToolUpdate {
             tool_call_id,
             partial,
         } => {
-            if let Some(card) = ui.borrow().stream.tools.get(&tool_call_id) {
-                let buf = card.body.buffer();
-                buf.set_text("");
-                insert_tagged(
-                    &buf,
-                    &serde_json::to_string_pretty(&partial).unwrap_or_default(),
-                    "tool",
-                );
+            let text = serde_json::to_string_pretty(&partial).unwrap_or_default();
+            if let Some(strip) = &ui.borrow().current_strip {
+                strip.set_partial(&tool_call_id, &text);
             }
         }
         SessionEvent::ToolEnd {
@@ -3147,19 +3344,15 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             is_error,
             result,
         } => {
-            if let Some(card) = ui.borrow().stream.tools.get(&tool_call_id) {
-                let buf = card.body.buffer();
-                buf.set_text("");
-                if is_error {
-                    insert_tagged(&buf, &format!("{tool_name} failed\n"), "md-bold");
-                    card.container.add_css_class("advisory-error");
-                }
-                insert_tagged(
-                    &buf,
-                    &serde_json::to_string_pretty(&result).unwrap_or_default(),
-                    "tool",
-                );
-            }
+            let live = ui.borrow().live_box.clone();
+            let text = serde_json::to_string_pretty(&result).unwrap_or_default();
+            strip_for(ui, &live, true).add_result(
+                ui,
+                &tool_call_id,
+                &tool_name,
+                &text,
+                is_error,
+            );
         }
         SessionEvent::AgentEnd => {
             set_streaming(ui, false);
