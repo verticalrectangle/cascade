@@ -233,6 +233,9 @@ struct StreamState {
     thinking_text: String,
     pending_text: String,
     flush_scheduled: bool,
+    /// Between MessageStart and MessageEnd. Deltas outside an open message
+    /// are reconnect replay of already-completed content — drop them.
+    message_open: bool,
     /// Text of the last optimistically-rendered user bubble + when, used to
     /// suppress the duplicate from the MessageEnd echo of the same message.
     last_user_echo: Option<(String, std::time::Instant)>,
@@ -3568,6 +3571,8 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             // (Re)connect welcome: the mapper resets and re-delivers deltas
             // whole. Reset ONLY the replay-duplicating accumulators — live
             // content stays; a just-rendered message must survive the flap.
+            // Fingerprints stay: clearing them let the tailer re-render
+            // already-rendered messages after a flap.
             let mut u = ui.borrow_mut();
             if let Some(tv) = u.stream.assistant.take() {
                 tv.buffer().set_text("");
@@ -3575,8 +3580,8 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             u.stream.thinking_body = None;
             u.stream.thinking_text.clear();
             u.stream.pending_text.clear();
+            u.stream.message_open = false;
             u.current_strip = None;
-            u.seen_fingerprints.clear();
         }
         SessionEvent::TurnStarted => {
             set_streaming(ui, true);
@@ -3588,6 +3593,12 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             u.stream.thinking_body = None;
         }
         SessionEvent::TextDelta { delta, .. } => {
+            // Deltas outside an open message are reconnect replay of
+            // already-completed content — drop them or they park a raw
+            // duplicate placeholder that no message_end ever replaces.
+            if !ui.borrow().stream.message_open {
+                return;
+            }
             let existing = ui.borrow().stream.assistant.clone();
             let tv = match existing {
                 Some(tv) => tv,
@@ -3618,6 +3629,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             }
         }
         SessionEvent::ThinkingDelta { delta, .. } => {
+            if !ui.borrow().stream.message_open {
+                return;
+            }
             // Thinking streams into a live strip chip that updates in place —
             // same design as settled thinking, no full-width streaming card.
             let live = ui.borrow().live_box.clone();
@@ -3630,6 +3644,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             strip_for(ui, &live, true).upsert_thinking(ui, "think-live", &text, true);
         }
         SessionEvent::MessageStart { role } => {
+            ui.borrow_mut().stream.message_open = true;
             if role == "assistant" || role == "model" {
                 clear_strip(ui); // fresh strip zone for this message's chips
                 if ui.borrow().stream.assistant.is_none() {
@@ -3750,8 +3765,12 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                         }
                     }
                 }
-                ui.borrow_mut().stream.assistant = None;
-                ui.borrow_mut().stream.thinking_body = None;
+                {
+                    let mut u = ui.borrow_mut();
+                    u.stream.assistant = None;
+                    u.stream.thinking_body = None;
+                    u.stream.message_open = false;
+                }
             }
         }
         SessionEvent::ToolStart {
