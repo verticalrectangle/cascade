@@ -2611,11 +2611,15 @@ fn rail_row(ui: &Rc<RefCell<Ui>>, meta: &ListedSession) -> GtkBox {
     let id = meta.id.clone();
     let kind = meta_kind(meta);
     let join_handle = meta.join_handle.clone();
+    // Discovered row with no collab room: the server drops prompts for
+    // these — mark it view-only instead of letting the composer lie.
+    let read_only = meta.origin.as_deref() == Some("discovered") && join_handle.is_none();
     click.connect_pressed(glib::clone!(#[strong] ui, move |_, _, _, _| {
         let _ = ui.borrow().cmd.try_send(Cmd::OpenSession {
             id: id.clone(),
             kind,
             join_handle: join_handle.clone(),
+            read_only,
         });
     }));
     row.add_controller(click);
@@ -2642,11 +2646,14 @@ fn render_inbox(ui: &Rc<RefCell<Ui>>) {
                 let kind = meta_kind(&meta);
                 let id = meta.id.clone();
                 let jh = meta.join_handle.clone();
+                let read_only =
+                    meta.origin.as_deref() == Some("discovered") && jh.is_none();
                 b.connect_clicked(glib::clone!(#[strong] ui, move |_| {
                     let _ = ui.borrow().cmd.try_send(Cmd::OpenSession {
                         id: id.clone(),
                         kind,
                         join_handle: jh.clone(),
+                        read_only,
                     });
                 }));
             }

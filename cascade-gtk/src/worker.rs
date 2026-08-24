@@ -146,6 +146,9 @@ pub enum Cmd {
         id: String,
         kind: BackendKind,
         join_handle: Option<String>,
+        /// Discovered session without a collab room: view-only, prompts
+        /// would be dropped server-side. Rail computes this.
+        read_only: bool,
     },
     Prompt(String),
     Abort,
@@ -425,6 +428,7 @@ pub async fn worker(
                     client,
                     &session_id,
                     Some(&token),
+                    true,
                     &mut current,
                     &mut pump,
                     &ui_tx,
@@ -588,6 +592,7 @@ pub async fn worker(
                                 id,
                                 kind,
                                 join_handle: jh,
+                                read_only: false,
                             })
                             .await;
                     }
@@ -604,6 +609,7 @@ pub async fn worker(
                 id,
                 kind,
                 join_handle,
+                read_only,
             } => match kind {
                 BackendKind::Local => {
                     if let Some(sess) = manager.get(&id).await {
@@ -616,6 +622,7 @@ pub async fn worker(
                             client,
                             &id,
                             None,
+                            read_only,
                             &mut current,
                             &mut pump,
                             &ui_tx,
@@ -964,6 +971,7 @@ async fn attach_cloud(
     client: &CloudClient,
     session_id: &str,
     share_token: Option<&str>,
+    read_only: bool,
     current: &mut Option<SessionBackend>,
     pump: &mut Option<AbortHandle>,
     ui_tx: &async_channel::Sender<UiMsg>,
@@ -995,7 +1003,7 @@ async fn attach_cloud(
                     id: session_id.to_string(),
                     kind: BackendKind::Cloud,
                     snapshot: None,
-                    read_only: share_token.is_some(),
+                                                        read_only: read_only || share_token.is_some(),
                 })
                 .await;
             send_pane_url(settings, session_id, ui_tx).await;
