@@ -29,6 +29,9 @@ pub enum SessionBackend {
         /// Dual-channel attach: history rides the proxy stream, prompts ride
         /// the session's collab room. Set when the row has a join_handle.
         guest_cmd: Option<mpsc::Sender<GuestCommand>>,
+        /// The room's event pump — must be aborted on teardown or every
+        /// re-attach stacks another duplicate renderer of the same events.
+        guest_pump: Option<AbortHandle>,
     },
     Terminal {
         session_id: String,
@@ -450,6 +453,7 @@ pub async fn worker(
                     &session_id,
                     Some(&token),
                     true,
+                    false,
                     &mut current,
                     &mut pump,
                     &ui_tx,
@@ -461,6 +465,11 @@ pub async fn worker(
             Cmd::Logout => {
                 if let Some(h) = pump.take() {
                     h.abort();
+                }
+                if let Some(SessionBackend::Cloud { guest_pump, .. }) = current.as_mut() {
+                    if let Some(h) = guest_pump.take() {
+                        h.abort();
+                    }
                 }
                 current = None;
                 cloud = None;
@@ -550,6 +559,7 @@ pub async fn worker(
                                         session_id: id.clone(),
                                         cmd: cmd_tx,
                                         guest_cmd: None,
+                                        guest_pump: None,
                                     });
                                     pump =
                                         Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
@@ -653,11 +663,15 @@ pub async fn worker(
                         // daemon): history attaches through the cloud relay
                         // proxy; prompts ride the collab room when the row has
                         // a join_handle (dual-channel attach).
+                        let has_room = join_handle
+                            .as_deref()
+                            .is_some_and(|s| !s.is_empty());
                         let attached = attach_cloud(
                             client,
                             &id,
                             None,
                             read_only,
+                            has_room,
                             &mut current,
                             &mut pump,
                             &ui_tx,
@@ -676,11 +690,22 @@ pub async fn worker(
                                         {
                                             *guest_cmd = Some(guest_tx);
                                         }
-                                        // Events duplicate the proxy feed;
-                                        // drain so the guest link stays alive.
-                                        tokio::spawn(async move {
-                                            while guest_ev.recv().await.is_ok() {}
-                                        });
+                                        // The room is the live channel:
+                                        // message_update deltas, early tool
+                                        // starts, completions. The proxy
+                                        // keeps history (snapshot pages);
+                                        // its live events are filtered out
+                                        // at attach so nothing double-renders.
+                                        let handle = spawn_broadcast_pump(
+                                            guest_ev,
+                                            ui_tx.clone(),
+                                            inbox.clone(),
+                                        );
+                                        if let Some(SessionBackend::Cloud { guest_pump, .. }) =
+                                            current.as_mut()
+                                        {
+                                            *guest_pump = Some(handle);
+                                        }
                                     }
                                     Err(e) => {
                                         let _ = ui_tx
@@ -714,6 +739,7 @@ pub async fn worker(
                                 session_id: id.clone(),
                                 cmd: cmd_tx,
                                 guest_cmd: None,
+                                guest_pump: None,
                             });
                             pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
                             let _ = ui_tx
@@ -930,6 +956,33 @@ fn spawn_broadcast_pump(
     .abort_handle()
 }
 
+/// Dual-channel variant: only history + lifecycle events pass; live content
+/// (deltas, message completions, tool events) arrives via the collab room.
+fn spawn_mpsc_pump_filtered(
+    mut rx: mpsc::UnboundedReceiver<SessionEvent>,
+    ui_tx: async_channel::Sender<UiMsg>,
+    inbox: Inbox,
+) -> AbortHandle {
+    tokio::spawn(async move {
+        while let Some(ev) = rx.recv().await {
+            let keep = matches!(
+                ev,
+                SessionEvent::Snapshot(_)
+                    | SessionEvent::StateChanged
+                    | SessionEvent::ProcessExited { .. }
+            );
+            if !keep {
+                continue;
+            }
+            pump_inbox(&ev, &inbox, &ui_tx);
+            if ui_tx.send(UiMsg::Event(ev)).await.is_err() {
+                break;
+            }
+        }
+    })
+    .abort_handle()
+}
+
 fn spawn_mpsc_pump(
     mut rx: mpsc::UnboundedReceiver<SessionEvent>,
     ui_tx: async_channel::Sender<UiMsg>,
@@ -1035,6 +1088,7 @@ async fn attach_cloud(
     session_id: &str,
     share_token: Option<&str>,
     read_only: bool,
+    suppress_live: bool,
     current: &mut Option<SessionBackend>,
     pump: &mut Option<AbortHandle>,
     ui_tx: &async_channel::Sender<UiMsg>,
@@ -1044,6 +1098,8 @@ async fn attach_cloud(
     // Owner attach pages the transcript (tail first, older on scroll-up);
     // shared/guest attach still gets the full snapshot — read-only streams
     // drop page commands, and the client buffers the overflow locally.
+    // When a collab room is attached alongside, live events arrive there
+    // instead — this stream stays history-only (snapshots + lifecycle).
     let result = if let Some(tok) = share_token {
         client.attach_shared(session_id, tok).await
     } else {
@@ -1056,12 +1112,22 @@ async fn attach_cloud(
             if let Some(h) = pump.take() {
                 h.abort();
             }
+            if let Some(SessionBackend::Cloud { guest_pump, .. }) = current.as_mut() {
+                if let Some(h) = guest_pump.take() {
+                    h.abort();
+                }
+            }
             *current = Some(SessionBackend::Cloud {
                 session_id: session_id.to_string(),
                 cmd: cmd_tx,
                 guest_cmd: None,
+                guest_pump: None,
             });
-            *pump = Some(spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone()));
+            *pump = Some(if suppress_live {
+                spawn_mpsc_pump_filtered(ev_rx, ui_tx.clone(), inbox.clone())
+            } else {
+                spawn_mpsc_pump(ev_rx, ui_tx.clone(), inbox.clone())
+            });
             let _ = ui_tx
                 .send(UiMsg::Attached {
                     id: session_id.to_string(),
