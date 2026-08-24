@@ -228,6 +228,9 @@ pub enum UiMsg {
     Event(SessionEvent),
     Toast(String),
     Error(String),
+    /// The guest channel's room stream ended naturally — the UI turns this
+    /// into a session refresh so the handle re-resolves and reconnects.
+    RoomGone,
     /// The attached session cannot accept prompts (guest channel failed on
     /// a discovered row) — disable the composer honestly.
     ReadOnly(bool),
@@ -990,6 +993,10 @@ fn spawn_guest_pump(
             }
         }
         flag.store(false, std::sync::atomic::Ordering::Relaxed);
+        // Room died (host flap, TUI restart, "no such room"): refresh so
+        // refresh_guest_channel re-resolves the handle and reconnects to
+        // the new room.
+        let _ = ui_tx.send(UiMsg::RoomGone).await;
     })
     .abort_handle()
 }

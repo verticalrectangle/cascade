@@ -1181,8 +1181,10 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         window.add_controller(keys);
     }
 
-    // relative-time refresh ~30s
+    // relative-time refresh ~30s + session refresh (room re-registration
+    // self-heals: the guest channel re-resolves the join handle)
     glib::timeout_add_local(Duration::from_secs(30), glib::clone!(#[strong] ui, move || {
+        let _ = ui.borrow().cmd.try_send(Cmd::RefreshSessions);
         render_rail(&ui);
         glib::ControlFlow::Continue
     }));
@@ -3023,6 +3025,9 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
         }
         UiMsg::Event(ev) => handle_event(ui, ev),
         UiMsg::Toast(t) => show_toast(ui, &t),
+        UiMsg::RoomGone => {
+            let _ = ui.borrow().cmd.try_send(Cmd::RefreshSessions);
+        }
         UiMsg::ReadOnly(v) => {
             ui.borrow_mut().read_only = v;
             sync_composer_mode(ui);
@@ -3837,7 +3842,9 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             }
         }
         SessionEvent::Notice { level, message } => {
-            if level == "info" {
+            // Collab lifecycle notices (reset/reconnect/no-such-room) are
+            // transient by nature — toast, never transcript furniture.
+            if level == "info" || message.starts_with("collab") {
                 show_toast(ui, &message);
             } else {
                 append_advisory(ui, &level, &message);
