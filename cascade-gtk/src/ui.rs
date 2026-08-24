@@ -1553,7 +1553,6 @@ fn insert_faded(ui: &Rc<RefCell<Ui>>, tv: &TextView, text: &str) {
     let fade = gtk4::TextTag::new(None);
     fade.set_foreground_rgba(Some(&hex_rgba(hex, 0.0)));
     buf.tag_table().add(&fade);
-    let start = buf.end_iter();
     let mut end = buf.end_iter();
     buf.insert_with_tags(&mut end, text, &[&fade, &base]);
     let mut step = 0u32;
@@ -1563,8 +1562,11 @@ fn insert_faded(ui: &Rc<RefCell<Ui>>, tv: &TextView, text: &str) {
         let a = (step as f64 / 9.0).min(1.0);
         fade.set_foreground_rgba(Some(&hex_rgba(&hex, a)));
         if step >= 9 {
-            let mut e = buf.end_iter();
-            buf.remove_tag(&fade, &start, &mut e);
+            // Drop the fade tag from the table, not the range: the range's
+            // start iter can be stale if the buffer was reset mid-fade
+            // (set_text on settle/reconnect) — gtk_text_buffer_remove_tag
+            // asserts on it. The base tag's color shows once the fade tag
+            // leaves the table.
             buf.tag_table().remove(&fade);
             glib::ControlFlow::Break
         } else {
@@ -2930,7 +2932,10 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
         UiMsg::SessionList(list) => {
             // Reconcile streaming with server truth (file freshness) — a lost
             // agent_end can never wedge Stop/Queue again.
-            if let Some(sel) = ui.borrow().selected_id.clone() {
+            // NB: bind before if-let — a scrutinee borrow lives through the
+            // whole body and set_streaming below needs borrow_mut.
+            let sel = ui.borrow().selected_id.clone();
+            if let Some(sel) = sel {
                 if let Some(working) = list
                     .iter()
                     .find(|m| m.id == sel)
