@@ -1802,6 +1802,11 @@ fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
 }
 
 /// Code block: header (lang + copy) + highlighted body + hover ghost copy.
+/// Code block: language label header + highlighted body. Copy buttons are
+/// gone (right-click "Copy code" remains); tall blocks cap at CAP_LINES
+/// with an expander bar so a huge dump can't eat the scroll.
+const CODE_CAP_PX: i32 = 340; // ~20 lines of 12.5pt mono
+
 fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
     let card = GtkBox::new(Orientation::Vertical, 0);
     card.add_css_class("code-block");
@@ -1815,12 +1820,7 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
     lang_label.add_css_class("code-header");
     lang_label.set_xalign(0.0);
     lang_label.set_hexpand(true);
-    let copy_btn = Button::with_label("copy");
-    copy_btn.add_css_class("code-copy");
-    let code_owned = code.to_string();
-    copy_btn.connect_clicked(move |_| copy_text(&code_owned));
     header.append(&lang_label);
-    header.append(&copy_btn);
     card.append(&header);
 
     let tv = new_view(ui);
@@ -1831,24 +1831,34 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
     }
     attach_copy_menu(&tv, "Copy code");
 
-    // hover ghost copy button (top-right over the body)
-    let body_overlay = Overlay::new();
-    body_overlay.set_child(Some(&tv));
-    let ghost = Button::with_label("copy");
-    ghost.add_css_class("copy-ghost");
-    ghost.set_halign(gtk4::Align::End);
-    ghost.set_valign(gtk4::Align::Start);
-    ghost.set_visible(false);
-    let code_owned2 = code.to_string();
-    ghost.connect_clicked(move |_| copy_text(&code_owned2));
-    body_overlay.add_overlay(&ghost);
-    let motion = EventControllerMotion::new();
-    let ghost_in = ghost.clone();
-    motion.connect_enter(move |_, _, _| ghost_in.set_visible(true));
-    let ghost_out = ghost.clone();
-    motion.connect_leave(move |_| ghost_out.set_visible(false));
-    card.add_controller(motion);
-    card.append(&body_overlay);
+    let lines = code.lines().count();
+    let cap_lines = (CODE_CAP_PX as f64 / 17.0) as usize;
+    if lines > cap_lines {
+        let scroll = ScrolledWindow::new();
+        scroll.set_hscrollbar_policy(gtk4::PolicyType::Automatic);
+        scroll.set_vscrollbar_policy(gtk4::PolicyType::Automatic);
+        scroll.set_propagate_natural_height(true);
+        scroll.set_max_content_height(CODE_CAP_PX);
+        scroll.set_child(Some(&tv));
+        card.append(&scroll);
+
+        let hidden = lines - cap_lines;
+        let more = Button::with_label(&format!("{hidden} more lines ▾"));
+        more.add_css_class("code-more");
+        let scroll_c = scroll.clone();
+        more.connect_clicked(move |btn| {
+            if scroll_c.max_content_height() > 0 {
+                scroll_c.set_max_content_height(-1);
+                btn.set_label("show less ▴");
+            } else {
+                scroll_c.set_max_content_height(CODE_CAP_PX);
+                btn.set_label(&format!("{hidden} more lines ▾"));
+            }
+        });
+        card.append(&more);
+    } else {
+        card.append(&tv);
+    }
     card
 }
 

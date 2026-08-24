@@ -963,3 +963,14 @@ selection {
 /* thinking chip — muted inline reasoning marker */
 .chip-thinking { background-color: rgba(224, 222, 244, 0.04); border-style: dashed; }
 .chip-thinking-name { font-style: italic; font-weight: 500; text-transform: none; letter-spacing: 0; color: #908CAA; }
+
+/* code block expander bar */
+.code-more {
+  font-size: 10px;
+  color: #908CAA;
+  border-top: 1px solid rgba(224, 222, 244, 0.1);
+  border-radius: 0;
+  padding: 4px 10px;
+  background: transparent;
+}
+.code-more:hover { color: #E0DEF4; background-color: rgba(224, 222, 244, 0.06); }
