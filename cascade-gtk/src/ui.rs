@@ -1491,6 +1491,30 @@ fn display_width(s: &str) -> usize {
     s.chars().map(char_display_width).sum()
 }
 
+/// Greedy word-boundary wrap for bodies rendered with wrap=None —
+/// keeps prose readable while the widget's height stays an exact line
+/// count (no height-for-width slab).
+fn soft_wrap(text: &str, width: usize) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let mut rest = line.trim_start();
+        while rest.chars().count() > width {
+            let cut = rest
+                .char_indices()
+                .nth(width)
+                .map(|(i, _)| i)
+                .unwrap_or(rest.len());
+            let break_at = rest[..cut].rfind(' ').map(|i| i + 1).unwrap_or(cut);
+            out.push_str(rest[..break_at].trim_end());
+            out.push('\n');
+            rest = rest[break_at..].trim_start();
+        }
+        out.push_str(rest);
+        out.push('\n');
+    }
+    out.trim_end_matches('\n').to_string()
+}
+
 fn pad_cell(text: &str, width: usize, align: markdown::Align) -> String {
     let w = display_width(text);
     let pad = width.saturating_sub(w);
@@ -2218,7 +2242,7 @@ impl ToolStrip {
         let buf = body.buffer();
         if chip.is_thinking {
             if let Some(r) = &chip.result {
-                insert_tagged(&buf, r, "thinking");
+                insert_tagged(&buf, &soft_wrap(r, 110), "thinking");
             }
             self.expansion.append(&card);
             return;
@@ -2303,7 +2327,10 @@ fn make_tool_card(
     // with a blank slab below the text. wrap=None makes the height an
     // exact line count, like code blocks. Prose cards (thinking,
     // advisory) keep word wrap.
-    if kind_class == "tool-tool-use" {
+    // Thinking too — reasoning prose is riddled with long lines and code
+    // fragments that mis-measure the same way. The insert path soft-wraps
+    // thinking text so lines stay readable with wrap off.
+    if kind_class == "tool-tool-use" || kind_class == "tool-thinking" {
         body.set_wrap_mode(gtk4::WrapMode::None);
     }
     let _ = body_tag; // caller inserts with the given tag
