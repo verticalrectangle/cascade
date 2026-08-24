@@ -40,6 +40,8 @@ const PANE_MAX: i32 = 600;
 const FOLLOW_MARGIN: f64 = 48.0;
 /// Scroll distance from the transcript top that triggers a history page.
 const HISTORY_TRIGGER: f64 = 150.0;
+/// Rolling window of rendered-message fingerprints (room + tailer / replay).
+const FINGERPRINT_CAP: usize = 64;
 
 // ── theme palettes (verbatim values from theme-dawn/moon.css) ────────
 
@@ -336,6 +338,9 @@ pub struct Ui {
     lightbox_pic: Picture,
     cmd: async_channel::Sender<Cmd>,
     stream: StreamState,
+    /// Per-attach fingerprints of messages already drawn. Second arrival
+    /// (room + tailer, or reconnect replay) skips the whole render.
+    seen_fingerprints: VecDeque<u64>,
     selected_id: Option<String>,
     attached_kind: Option<BackendKind>,
     metas: Vec<ListedSession>,
@@ -863,6 +868,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         lightbox_pic,
         cmd: cmd.clone(),
         stream: StreamState::default(),
+        seen_fingerprints: VecDeque::new(),
         selected_id: None,
         attached_kind: None,
         metas: Vec::new(),
@@ -2954,6 +2960,7 @@ fn dispatch(ui: &Rc<RefCell<Ui>>, msg: UiMsg) {
                 u.follow.set(follow);
                 u.selected_id = Some(id.clone());
                 u.stream = StreamState::default();
+                u.seen_fingerprints.clear();
                 u.attached_kind = Some(kind);
                 u.read_only = read_only;
                 u.share_link_reveal.set_reveal_child(false);
@@ -3147,6 +3154,72 @@ fn thinking_text(part: &serde_json::Value) -> Option<String> {
         .filter(|s| !s.is_empty())
 }
 
+/// Hash of role + content-part types, text, toolCall ids, and thinking text.
+fn message_fingerprint(msg: &serde_json::Value) -> u64 {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut h = DefaultHasher::new();
+    msg.get("role")
+        .and_then(|r| r.as_str())
+        .unwrap_or("assistant")
+        .hash(&mut h);
+    if let Some(id) = str_field(msg, &["toolCallId", "tool_call_id"]) {
+        id.hash(&mut h);
+    }
+    match msg.get("content") {
+        Some(serde_json::Value::Array(arr)) => {
+            for part in arr {
+                fingerprint_part(&mut h, part);
+            }
+        }
+        Some(serde_json::Value::String(s)) => s.hash(&mut h),
+        Some(other) => {
+            if let Some(s) = other.get("text").and_then(|t| t.as_str()) {
+                s.hash(&mut h);
+            }
+        }
+        None => {
+            if let Some(s) = msg.get("text").and_then(|t| t.as_str()) {
+                s.hash(&mut h);
+            }
+        }
+    }
+    h.finish()
+}
+
+fn fingerprint_part(h: &mut impl std::hash::Hasher, part: &serde_json::Value) {
+    use std::hash::Hash;
+    let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+    ty.hash(h);
+    if let Some(text) = part.get("text").and_then(|t| t.as_str()) {
+        text.hash(h);
+    } else if let Some(s) = part.as_str() {
+        s.hash(h);
+    }
+    if ty == "toolCall" || ty == "tool_call" {
+        if let Some(id) = str_field(part, &["id", "toolCallId"]) {
+            id.hash(h);
+        }
+    }
+    if let Some(t) = thinking_text(part) {
+        t.hash(h);
+    }
+}
+
+/// Record `msg` in the rolling window. True if it was already rendered.
+fn message_already_rendered(ui: &Rc<RefCell<Ui>>, msg: &serde_json::Value) -> bool {
+    let fp = message_fingerprint(msg);
+    let mut u = ui.borrow_mut();
+    if u.seen_fingerprints.contains(&fp) {
+        return true;
+    }
+    if u.seen_fingerprints.len() >= FINGERPRINT_CAP {
+        u.seen_fingerprints.pop_front();
+    }
+    u.seen_fingerprints.push_back(fp);
+    false
+}
+
 fn fill_tool_result(
     body: &TextView,
     container: &GtkBox,
@@ -3250,6 +3323,9 @@ fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
         let mut u = ui.borrow_mut();
         clear_box(&u.durable_box);
         u.current_strip = None;
+        // Replacing the transcript: old fingerprints would skip every row
+        // and leave an empty box.
+        u.seen_fingerprints.clear();
     }
     let mut msgs = snap.messages;
     {
@@ -3289,6 +3365,9 @@ fn apply_snapshot_tail(ui: &Rc<RefCell<Ui>>, snap: SessionSnapshot) {
 
 /// One message into an explicit parent — shared by tail render and prepend.
 fn render_history_message(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, msg: &serde_json::Value) {
+    if message_already_rendered(ui, msg) {
+        return;
+    }
     let role = msg
         .get("role")
         .and_then(|r| r.as_str())
@@ -3497,6 +3576,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             u.stream.thinking_text.clear();
             u.stream.pending_text.clear();
             u.current_strip = None;
+            u.seen_fingerprints.clear();
         }
         SessionEvent::TurnStarted => {
             set_streaming(ui, true);
@@ -3558,96 +3638,101 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             }
         }
         SessionEvent::MessageEnd { message } => {
-            let role = message
-                .get("role")
-                .and_then(|r| r.as_str())
-                .unwrap_or("assistant")
-                .to_string();
-            if role == "toolResult" {
-                // Discovered sessions stream tool results ONLY as MessageEnd
-                // lines — route them into the card path or they spill into
-                // the transcript as bare prose (the "Wall time" soup).
-                let live = ui.borrow().live_box.clone();
-                apply_history_tool_result(ui, &live, &message);
-            } else if role == "user" || role == "human" {
-                if let Some((_, text)) = parse_agent_message(&message) {
-                    if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
-                        let dup = {
-                            let u = ui.borrow();
-                            u.stream.last_user_echo.as_ref().is_some_and(|(t, when)| {
-                                *t == text && when.elapsed() < std::time::Duration::from_secs(30)
-                            })
-                        };
-                        if dup {
-                            ui.borrow_mut().stream.last_user_echo = None;
-                        } else {
-                            append_user_bubble_inner(ui, &text, &[], true);
+            if message_already_rendered(ui, &message) {
+                ui.borrow_mut().stream.assistant = None;
+                ui.borrow_mut().stream.thinking_body = None;
+            } else {
+                let role = message
+                    .get("role")
+                    .and_then(|r| r.as_str())
+                    .unwrap_or("assistant")
+                    .to_string();
+                if role == "toolResult" {
+                    // Discovered sessions stream tool results ONLY as MessageEnd
+                    // lines — route them into the card path or they spill into
+                    // the transcript as bare prose (the "Wall time" soup).
+                    let live = ui.borrow().live_box.clone();
+                    apply_history_tool_result(ui, &live, &message);
+                } else if role == "user" || role == "human" {
+                    if let Some((_, text)) = parse_agent_message(&message) {
+                        if ui.borrow().stream.assistant.is_none() && !text.is_empty() {
+                            let dup = {
+                                let u = ui.borrow();
+                                u.stream.last_user_echo.as_ref().is_some_and(|(t, when)| {
+                                    *t == text && when.elapsed() < std::time::Duration::from_secs(30)
+                                })
+                            };
+                            if dup {
+                                ui.borrow_mut().stream.last_user_echo = None;
+                            } else {
+                                append_user_bubble_inner(ui, &text, &[], true);
+                            }
                         }
                     }
-                }
-            } else {
-                // Ordered part walk — same sequence as the replay path, so a
-                // ['thinking','text'] message renders thinking-then-prose live
-                // instead of prose with the thinking card parked after it.
-                let live = ui.borrow().live_box.clone();
-                let skip_text = ui.borrow().stream.assistant.is_some();
-                if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
-                    for part in arr {
-                        let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
-                        match ty {
-                            "thinking" | "redactedThinking" | "reasoning" => {
-                                if let Some(text) = thinking_text(part) {
-                                    // A delta-driven live chip (if any) becomes
-                                    // the final chip — no second card for the
-                                    // same thinking block.
-                                    if ui.borrow().stream.thinking_text.is_empty() {
-                                        append_thinking_chip(ui, &live, &text, true);
-                                    } else {
-                                        strip_for(ui, &live, true).upsert_thinking(
-                                            ui,
-                                            "think-live",
-                                            &text,
-                                            false,
-                                        );
-                                        ui.borrow_mut().stream.thinking_text.clear();
+                } else {
+                    // Ordered part walk — same sequence as the replay path, so a
+                    // ['thinking','text'] message renders thinking-then-prose live
+                    // instead of prose with the thinking card parked after it.
+                    let live = ui.borrow().live_box.clone();
+                    let skip_text = ui.borrow().stream.assistant.is_some();
+                    if let Some(arr) = message.get("content").and_then(|c| c.as_array()) {
+                        for part in arr {
+                            let ty = part.get("type").and_then(|t| t.as_str()).unwrap_or("");
+                            match ty {
+                                "thinking" | "redactedThinking" | "reasoning" => {
+                                    if let Some(text) = thinking_text(part) {
+                                        // A delta-driven live chip (if any) becomes
+                                        // the final chip — no second card for the
+                                        // same thinking block.
+                                        if ui.borrow().stream.thinking_text.is_empty() {
+                                            append_thinking_chip(ui, &live, &text, true);
+                                        } else {
+                                            strip_for(ui, &live, true).upsert_thinking(
+                                                ui,
+                                                "think-live",
+                                                &text,
+                                                false,
+                                            );
+                                            ui.borrow_mut().stream.thinking_text.clear();
+                                        }
                                     }
                                 }
-                            }
-                            "toolCall" => {
-                                let id = part
-                                    .get("id")
-                                    .and_then(|v| v.as_str())
-                                    .unwrap_or("");
-                                if !id.is_empty()
-                                    && !ui
-                                        .borrow()
-                                        .current_strip
-                                        .as_ref()
-                                        .is_some_and(|s| s.has(id))
-                                {
-                                    append_history_tool_call_anim(ui, &live, part, true);
+                                "toolCall" => {
+                                    let id = part
+                                        .get("id")
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("");
+                                    if !id.is_empty()
+                                        && !ui
+                                            .borrow()
+                                            .current_strip
+                                            .as_ref()
+                                            .is_some_and(|s| s.has(id))
+                                    {
+                                        append_history_tool_call_anim(ui, &live, part, true);
+                                    }
                                 }
-                            }
-                            _ => {
-                                if !skip_text {
-                                    if let Some(t) = part_plain_text(part) {
-                                        if !t.is_empty() {
-                                            render_markdown_into(ui, &live, &t);
+                                _ => {
+                                    if !skip_text {
+                                        if let Some(t) = part_plain_text(part) {
+                                            if !t.is_empty() {
+                                                render_markdown_into(ui, &live, &t);
+                                            }
                                         }
                                     }
                                 }
                             }
                         }
-                    }
-                } else if !skip_text {
-                    let text = message_plain_text(&message);
-                    if !text.is_empty() {
-                        render_markdown_into(ui, &live, &text);
+                    } else if !skip_text {
+                        let text = message_plain_text(&message);
+                        if !text.is_empty() {
+                            render_markdown_into(ui, &live, &text);
+                        }
                     }
                 }
+                ui.borrow_mut().stream.assistant = None;
+                ui.borrow_mut().stream.thinking_body = None;
             }
-            ui.borrow_mut().stream.assistant = None;
-            ui.borrow_mut().stream.thinking_body = None;
         }
         SessionEvent::ToolStart {
             tool_call_id,
@@ -3713,9 +3798,13 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             }
         }
         SessionEvent::Notice { level, message } => {
-            append_advisory(ui, &level, &message);
-            if level == "error" {
-                show_toast(ui, &format!("error: {message}"));
+            if level == "info" {
+                show_toast(ui, &message);
+            } else {
+                append_advisory(ui, &level, &message);
+                if level == "error" {
+                    show_toast(ui, &format!("error: {message}"));
+                }
             }
         }
         SessionEvent::SessionInfo { title, session_id } => {

@@ -20,6 +20,81 @@ const HOST_PEER_BROADCAST = 0;
 const CONNECT_TIMEOUT_MS = 15_000;
 const BACKOFF_BASE_MS = 1_000;
 const BACKOFF_MAX_MS = 30_000;
+const PING_INTERVAL_MS = 15_000;
+
+/**
+ * Dedicated-worker source for the room WebSocket. Bun answers protocol pings
+ * on the same event loop as the socket's owner; a blocked plugin/agent loop
+ * therefore leaves relay pings unanswered and the relay drops the host (room
+ * dies, guests reset). This worker owns the socket so ping/pong and the
+ * client heartbeat keep running while the plugin thread is busy.
+ */
+const SOCKET_WORKER_SOURCE = `"use strict";
+const PING_INTERVAL_MS = ${PING_INTERVAL_MS};
+let ws = null;
+let heartbeat = 0;
+
+function stopHeartbeat() {
+	if (heartbeat) {
+		clearInterval(heartbeat);
+		heartbeat = 0;
+	}
+}
+
+function startHeartbeat(sock) {
+	stopHeartbeat();
+	heartbeat = setInterval(function () {
+		if (!sock || sock.readyState !== 1) return;
+		try { sock.ping(""); } catch (_) {}
+	}, PING_INTERVAL_MS);
+}
+
+function attach(sock, gen) {
+	sock.binaryType = "arraybuffer";
+	sock.onopen = function () {
+		startHeartbeat(sock);
+		postMessage({ t: "open", gen: gen });
+	};
+	sock.onmessage = function (event) {
+		postMessage({ t: "message", gen: gen, data: event.data });
+	};
+	sock.onerror = function () {};
+	sock.onclose = function (event) {
+		stopHeartbeat();
+		postMessage({ t: "close", gen: gen, code: event.code, reason: event.reason || "" });
+	};
+	try {
+		sock.addEventListener("ping", function (event) {
+			try { sock.pong(event.data ?? ""); } catch (_) {}
+		});
+	} catch (_) {}
+}
+
+onmessage = function (event) {
+	var msg = event.data;
+	if (msg.t === "connect") {
+		stopHeartbeat();
+		if (ws) {
+			try { ws.onclose = null; ws.close(1000); } catch (_) {}
+			ws = null;
+		}
+		ws = new WebSocket(msg.url);
+		attach(ws, msg.gen);
+	} else if (msg.t === "send") {
+		if (ws && ws.readyState === 1) {
+			try { ws.send(msg.data); } catch (_) {}
+		}
+	} else if (msg.t === "close") {
+		stopHeartbeat();
+		var sock = ws;
+		ws = null;
+		if (sock) {
+			try { sock.onclose = null; sock.close(1000); } catch (_) {}
+		}
+	}
+};
+`;
+
 const FATAL_CLOSE: Record<number, string> = {
 	4001: "room closed",
 	4004: "no such room",
@@ -135,12 +210,21 @@ class MiniCollabHost {
 	#writeToken: Uint8Array;
 	#onFrame: (frame: CollabFrame, fromPeer: number) => void;
 	#log: ExtensionAPI["logger"];
-	#ws: WebSocket | null = null;
+	#worker: Worker | null = null;
+	#workerUrl: string | null = null;
 	#closed = false;
+	#live = false;
+	#socketOpened = false;
+	#gen = 0;
 	#attempt = 0;
 	#retryTimer: ReturnType<typeof setTimeout> | undefined;
 	#sendChain: Promise<void> = Promise.resolve();
 	#recvChain: Promise<void> = Promise.resolve();
+	#openWait: {
+		gen: number;
+		onFirstOpen?: () => void;
+		onFirstFail?: (err: Error) => void;
+	} | null = null;
 
 	constructor(opts: {
 		wsUrl: string;
@@ -175,19 +259,21 @@ class MiniCollabHost {
 				this.close();
 				reject(new Error("timed out connecting to collab relay"));
 			}, CONNECT_TIMEOUT_MS);
-			const onFirstOpen = (): void => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				resolve();
-			};
-			this.#openSocket(onFirstOpen, (err) => {
-				if (settled) return;
-				settled = true;
-				clearTimeout(timeout);
-				this.close();
-				reject(err);
-			});
+			this.#openSocket(
+				() => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timeout);
+					resolve();
+				},
+				(err) => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timeout);
+					this.close();
+					reject(err);
+				},
+			);
 		});
 	}
 
@@ -197,10 +283,8 @@ class MiniCollabHost {
 				if (this.#closed) return;
 				const sealed = await seal(this.#key, frame);
 				const envelope = packEnvelope(targetPeer, sealed);
-				const ws = this.#ws;
-				if (ws && ws.readyState === WebSocket.OPEN) {
-					ws.send(envelope);
-				}
+				if (this.#closed || !this.#live || !this.#worker) return;
+				this.#worker.postMessage({ t: "send", data: envelope });
 			})
 			.catch((err: unknown) => {
 				this.#log.debug("cascade-omp-plugin: send failed", { error: String(err) });
@@ -209,59 +293,110 @@ class MiniCollabHost {
 
 	close(): void {
 		this.#closed = true;
+		this.#live = false;
+		this.#openWait = null;
+		this.#gen++;
 		if (this.#retryTimer !== undefined) {
 			clearTimeout(this.#retryTimer);
 			this.#retryTimer = undefined;
 		}
-		const ws = this.#ws;
-		this.#ws = null;
-		if (ws) {
+		const worker = this.#worker;
+		this.#worker = null;
+		if (worker) {
 			try {
-				ws.close(1000);
+				worker.postMessage({ t: "close" });
 			} catch {
-				// already closing
+				// already dead
 			}
+			try {
+				worker.terminate();
+			} catch {
+				// already dead
+			}
+		}
+		if (this.#workerUrl) {
+			URL.revokeObjectURL(this.#workerUrl);
+			this.#workerUrl = null;
 		}
 	}
 
-	#openSocket(onFirstOpen?: () => void, onFirstFail?: (err: Error) => void): void {
-		const ws = new WebSocket(`${this.wsUrl}?role=host`);
-		ws.binaryType = "arraybuffer";
-		this.#ws = ws;
-		let opened = false;
-		ws.onopen = () => {
-			if (this.#ws !== ws) return;
-			opened = true;
-			this.#attempt = 0;
-			onFirstOpen?.();
+	#ensureWorker(): Worker {
+		if (this.#worker) return this.#worker;
+		if (!this.#workerUrl) {
+			this.#workerUrl = URL.createObjectURL(new Blob([SOCKET_WORKER_SOURCE], { type: "text/javascript" }));
+		}
+		const worker = new Worker(this.#workerUrl);
+		this.#worker = worker;
+		worker.onmessage = (event: MessageEvent) => {
+			this.#onWorkerMessage(event.data);
 		};
-		ws.onmessage = (event: MessageEvent) => {
-			if (this.#ws !== ws) return;
-			this.#handleMessage(ws, event.data);
+		worker.onerror = () => {
+			if (this.#worker === worker) this.#worker = null;
+			this.#onSocketClose(this.#gen, 1006, "socket worker error");
 		};
-		ws.onerror = () => {
-			// close carries the reason
-		};
-		ws.onclose = (event: CloseEvent) => {
-			if (this.#ws !== ws) return;
-			this.#ws = null;
-			const fatal = FATAL_CLOSE[event.code];
-			if (fatal) {
-				this.#closed = true;
-				this.#log.warn("cascade-omp-plugin: collab relay fatal close", { code: event.code, reason: fatal });
-				if (!opened) onFirstFail?.(new Error(fatal));
-				return;
-			}
-			if (this.#closed) return;
-			if (!opened) {
-				onFirstFail?.(new Error(event.reason || `connection lost (code ${event.code})`));
-				return;
-			}
-			this.#scheduleRetry();
-		};
+		return worker;
 	}
 
-	#handleMessage(ws: WebSocket, data: unknown): void {
+	#openSocket(onFirstOpen?: () => void, onFirstFail?: (err: Error) => void): void {
+		const worker = this.#ensureWorker();
+		const gen = ++this.#gen;
+		this.#live = false;
+		this.#socketOpened = false;
+		this.#openWait = { gen, onFirstOpen, onFirstFail };
+		worker.postMessage({ t: "connect", url: `${this.wsUrl}?role=host`, gen });
+	}
+
+	#onWorkerMessage(data: unknown): void {
+		if (!data || typeof data !== "object") return;
+		const msg = data as {
+			t?: string;
+			gen?: number;
+			data?: unknown;
+			code?: number;
+			reason?: string;
+		};
+		const gen = Number(msg.gen);
+		if (gen !== this.#gen) return;
+		if (msg.t === "open") {
+			this.#live = true;
+			this.#socketOpened = true;
+			this.#attempt = 0;
+			const wait = this.#openWait;
+			this.#openWait = null;
+			if (wait && wait.gen === gen) wait.onFirstOpen?.();
+			return;
+		}
+		if (msg.t === "message") {
+			this.#handleMessage(gen, msg.data);
+			return;
+		}
+		if (msg.t === "close") {
+			this.#onSocketClose(gen, Number(msg.code) || 1006, String(msg.reason || ""));
+		}
+	}
+
+	#onSocketClose(gen: number, code: number, reason: string): void {
+		if (gen !== this.#gen) return;
+		this.#live = false;
+		const wait = this.#openWait;
+		if (wait && wait.gen === gen) this.#openWait = null;
+		const opened = this.#socketOpened;
+		const fatal = FATAL_CLOSE[code];
+		if (fatal) {
+			this.#closed = true;
+			this.#log.warn("cascade-omp-plugin: collab relay fatal close", { code, reason: fatal });
+			if (!opened) wait?.onFirstFail?.(new Error(fatal));
+			return;
+		}
+		if (this.#closed) return;
+		if (!opened && wait?.onFirstFail) {
+			wait.onFirstFail(new Error(reason || `connection lost (code ${code})`));
+			return;
+		}
+		this.#scheduleRetry();
+	}
+
+	#handleMessage(gen: number, data: unknown): void {
 		if (typeof data === "string") {
 			try {
 				JSON.parse(data);
@@ -276,7 +411,7 @@ class MiniCollabHost {
 		if (!envelope) return;
 		this.#recvChain = this.#recvChain
 			.then(async () => {
-				if (this.#ws !== ws) return;
+				if (gen !== this.#gen) return;
 				let frame: CollabFrame;
 				try {
 					frame = await openSealed(this.#key, envelope.payload);
@@ -285,7 +420,7 @@ class MiniCollabHost {
 					this.close();
 					return;
 				}
-				if (this.#ws !== ws) return;
+				if (gen !== this.#gen) return;
 				this.#onFrame(frame, envelope.peerId);
 			})
 			.catch((err: unknown) => {
