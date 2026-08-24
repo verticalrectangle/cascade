@@ -1682,6 +1682,8 @@ fn attach_copy_menu(view: &TextView, label: &str) {
 /// Render one assistant markdown body into `parent` (durable or live box).
 fn render_markdown_into(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, body: &str) {
     clear_strip(ui); // prose closes the current tool burst
+    let poke = ui.borrow().transcript_scroll.clone();
+    glib::idle_add_local_once(move || poke.queue_resize());
     if body.contains("Wall time") {
     }
     for block in markdown::parse_blocks(body) {
@@ -1849,12 +1851,14 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
             }
         };
         render(&buf, false);
+        tv.queue_resize();
         card.append(&tv);
 
         let more = Button::with_label(&format!("{hidden} more lines ▾"));
         more.add_css_class("code-more");
         let expanded = std::cell::Cell::new(false);
         let ui_c = ui.clone();
+        let tv_c = tv.clone();
         more.connect_clicked(move |btn| {
             // Same rule as chips and card chevrons: expanding pushes content
             // down; the bottom-pin must not convert it into an upward shove.
@@ -1862,6 +1866,7 @@ fn code_block_widget(ui: &Rc<RefCell<Ui>>, lang: &str, code: &str) -> GtkBox {
             let now = !expanded.get();
             expanded.set(now);
             render(&buf, now);
+            tv_c.queue_resize();
             btn.set_label(if now {
                 "show less ▴"
             } else {
@@ -2234,6 +2239,7 @@ impl ToolStrip {
             card.add_css_class("advisory-error");
         }
         self.expansion.append(&card);
+        self.expansion.queue_resize();
     }
 }
 
@@ -2962,11 +2968,13 @@ fn fill_tool_result(
 ) {
     let buf = body.buffer();
     buf.set_text("");
+    body.queue_resize();
     if is_error {
         insert_tagged(&buf, &format!("{tool_name} failed\n"), "md-bold");
         container.add_css_class("advisory-error");
     }
     insert_tagged(&buf, text, "tool");
+    body.queue_resize();
 }
 
 fn append_history_tool_call(ui: &Rc<RefCell<Ui>>, parent: &GtkBox, part: &serde_json::Value) {
@@ -3274,6 +3282,9 @@ fn settle_live(ui: &Rc<RefCell<Ui>>) {
     u.current_strip = None;
     clear_box(&u.queue_strip);
     u.queue_strip.set_visible(false);
+    // Content moved and heights changed — re-measure now instead of
+    // leaving stale allocations until the next scroll.
+    u.transcript_scroll.queue_resize();
 }
 
 fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
@@ -3300,6 +3311,7 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
             };
             let buf = tv.buffer();
             insert_tagged(&buf, &delta, "assistant");
+            tv.queue_resize();
         }
         SessionEvent::ThinkingDelta { delta, .. } => {
             let existing_body = ui.borrow().stream.thinking_body.clone();
