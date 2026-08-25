@@ -841,7 +841,7 @@ final class CascadeClient: ObservableObject {
             if let ro = frame["readOnly"] as? Bool {
                 readOnly = ro || !guestWriteToken
             } else {
-                readOnly = __omp_shell("guestWriteToken")
+                readOnly = !guestWriteToken
             }
             rebuild()
         }
