@@ -310,6 +310,7 @@ pub struct Ui {
     rail_list: GtkBox,
     transcript_scroll: ScrolledWindow,
     jump_pill: Button,
+    bottom_sentinel: Label,
     durable_box: GtkBox,
     live_box: GtkBox,
     follow: Cell<bool>,
@@ -377,6 +378,46 @@ fn session_display_name(m: &ListedSession) -> String {
 }
 
 /// "~/dev/cascade" for home-relative paths, full path otherwise; "~" for home.
+/// Viewport-space distance between the bottom sentinel and the fold: 0 when
+/// the live end of the transcript is at the bottom edge. All follow/pin math
+/// anchors here — the adjustment's upper can lie (inflated heights), a real
+/// widget's allocation can't.
+fn sentinel_gap(u: &Ui) -> Option<f64> {
+    let adj = u.transcript_scroll.vadjustment();
+    let (_, y) = u.bottom_sentinel.translate_coordinates(&u.transcript_scroll, 0.0, 0.0)?;
+    Some(y - adj.page_size())
+}
+
+/// CASCADE_DEBUG_LAYOUT=1: log transcript children whose allocation exceeds
+/// their natural measure by >40px — the inflated-height widgets that lie to
+/// the scrollbar about how tall the content is.
+fn debug_inflated_children(ui: &Rc<RefCell<Ui>>) {
+    fn walk(box_: &GtkBox, tag: &str) {
+        let mut child = box_.first_child();
+        while let Some(w) = child {
+            let alloc = w.allocated_height();
+            let (_min, nat, _mb, _nb) = w.measure(gtk4::Orientation::Vertical, -1);
+            if alloc > nat + 40 {
+                let classes = w.css_classes();
+                eprintln!(
+                    "INFLATED {tag}: {} classes={:?} alloc={} nat={}",
+                    w.type_().name(),
+                    classes,
+                    alloc,
+                    nat
+                );
+            }
+            if let Some(b) = w.downcast_ref::<GtkBox>() {
+                walk(b, tag);
+            }
+            child = w.next_sibling();
+        }
+    }
+    let u = ui.borrow();
+    walk(&u.durable_box, "durable");
+    walk(&u.live_box, "live");
+}
+
 fn abbreviate_path(cwd: &str) -> Option<String> {
     if cwd.is_empty() {
         return None;
@@ -568,6 +609,13 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
     transcript_box.append(&live_box);
 
     let transcript_scroll = ScrolledWindow::new();
+    // Zero-height sentinel at the very end: follow/pin math anchors to its
+    // REAL position, never the adjustment's upper — an inflated height
+    // request anywhere upstream can no longer park the viewport in dead
+    // space or strand new messages above the fold.
+    let bottom_sentinel = Label::new(None);
+    bottom_sentinel.set_size_request(0, 1);
+    transcript_box.append(&bottom_sentinel);
     transcript_scroll.set_child(Some(&transcript_box));
     transcript_scroll.set_vexpand(true);
     transcript_scroll.set_hexpand(true);
@@ -857,6 +905,7 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         programmatic: Cell::new(false),
         current_strip: None,
         jump_pill,
+        bottom_sentinel,
         history: VecDeque::new(),
         history_oldest_rendered: 0,
         history_server_more: false,
@@ -1066,13 +1115,15 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
             let near_top = {
                 let u = ui.borrow();
                 if !u.programmatic.get() {
-                    // Drop quickly, re-engage with slack — a growing transcript
-                    // otherwise strands the pin just above the bottom forever.
-                    let gap = adj.upper() - adj.page_size() - adj.value();
-                    if gap > FOLLOW_MARGIN {
-                        u.follow.set(false);
-                    } else if gap <= FOLLOW_REENGAGE_MARGIN {
-                        u.follow.set(true);
+                    // Pin math anchors to the sentinel's REAL position, never
+                    // the adjustment's upper — an inflated height request
+                    // can't strand the viewport in dead space anymore.
+                    if let Some(gap) = sentinel_gap(&u) {
+                        if gap > FOLLOW_MARGIN {
+                            u.follow.set(false);
+                        } else if gap <= FOLLOW_REENGAGE_MARGIN {
+                            u.follow.set(true);
+                        }
                     }
                 }
                 adj.value() < HISTORY_TRIGGER
@@ -1089,13 +1140,19 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         // frame-tick follow: scroll after layout when pinned
         ui.borrow().transcript_scroll.add_tick_callback(glib::clone!(#[strong] ui, move |_, _| {
             let u = ui.borrow();
+            // Jump pill rides the sentinel too: show when real content sits
+            // below the fold and we're not following.
+            if let Some(gap) = sentinel_gap(&u) {
+                u.jump_pill.set_visible(gap > 4.0 && !u.follow.get());
+            }
             if u.follow.get() {
-                let adj = u.transcript_scroll.vadjustment();
-                let target = (adj.upper() - adj.page_size()).max(0.0);
-                if (adj.value() - target).abs() > 1.0 {
-                    u.programmatic.set(true);
-                    adj.set_value(target);
-                    u.programmatic.set(false);
+                if let Some(gap) = sentinel_gap(&u) {
+                    if gap.abs() > 1.0 {
+                        u.programmatic.set(true);
+                        let adj = u.transcript_scroll.vadjustment();
+                        adj.set_value(adj.value() + gap);
+                        u.programmatic.set(false);
+                    }
                 }
             }
             glib::ControlFlow::Continue
@@ -1211,6 +1268,14 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
             glib::Propagation::Proceed
         }));
         window.add_controller(keys);
+    }
+
+    // layout forensics (env-gated): name the widgets that lie to the scrollbar
+    if std::env::var("CASCADE_DEBUG_LAYOUT").is_ok() {
+        glib::timeout_add_local(Duration::from_secs(2), glib::clone!(#[strong] ui, move || {
+            debug_inflated_children(&ui);
+            glib::ControlFlow::Continue
+        }));
     }
 
     // relative-time refresh ~30s + session refresh (room re-registration
@@ -3603,6 +3668,8 @@ fn settle_live(ui: &Rc<RefCell<Ui>>) {
     u.queue_strip.set_visible(false);
     // Content moved and heights changed — re-measure now instead of
     // leaving stale allocations until the next scroll.
+    u.live_box.queue_resize();
+    u.durable_box.queue_resize();
     u.transcript_scroll.queue_resize();
 }
 
@@ -3741,6 +3808,11 @@ fn handle_event(ui: &Rc<RefCell<Ui>>, ev: SessionEvent) {
                     if let Some(tv) = stale_stream {
                         let live_box = ui.borrow().live_box.clone();
                         live_box.remove(&tv);
+                        // The view held the last message's full height; without
+                        // this the box keeps the stale allocation (the 5247px
+                        // dead zone the scrollbar then believes in).
+                        live_box.queue_resize();
+                        ui.borrow().transcript_scroll.queue_resize();
                     }
                     ui.borrow_mut().stream.pending_text.clear();
                     let live = ui.borrow().live_box.clone();

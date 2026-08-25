@@ -561,13 +561,13 @@ scrollbar slider:hover {
   background: transparent;
   border: none;
   border-bottom: 1px solid #DFDAD9;
-  padding: 2px 6px;
-  min-height: 0;
+  padding: 10px 12px;
+  min-height: 40px;
 }
 .topbar-title {
   color: #403C58;
   font-weight: 600;
-  font-size: 17px;
+  font-size: 19px;
 }
 
 /* Collapsible card headers (click to expand). */
