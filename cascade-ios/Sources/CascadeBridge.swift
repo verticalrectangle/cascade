@@ -156,6 +156,10 @@ final class CascadeClient: ObservableObject {
     private let deviceName: String
     private var guestSocket: CollabGuestSocket?
     private var guestMapper = CollabFrameMapper()
+    /// Guest is a prompt/abort/answer write channel; transcript stays on the cloud stream.
+    private var guestPromptOnly = false
+    private var guestWriteToken = false
+    private let pagedSnapshot: Bool
     private var socketTask: URLSessionWebSocketTask?
     private var socketSession: URLSession?
     private var receiveLoop = false
@@ -191,10 +195,12 @@ final class CascadeClient: ObservableObject {
         let sessionId: String
         let name: String
         let readOnly: Bool
+        let paged: Bool
         /// Pre-set when attaching to an existing session (skips login+list).
-        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false) {
+        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true) {
             self.base = base; self.token = token; self.sessionId = sessionId; self.name = name
             self.readOnly = readOnly
+            self.paged = paged
         }
     }
 
@@ -495,21 +501,39 @@ final class CascadeClient: ObservableObject {
         title = "new session"
         cwd = "…"
         readOnly = config.readOnly
+        pagedSnapshot = config.paged
     }
 
     /// Attach to a `kind: terminal` session via an omp collab join/view handle.
     convenience init?(terminalLink: String, name: String) {
         guard case .success(let parsed) = CollabLinkParser.parse(terminalLink) else { return nil }
         self.init(config: Config(base: parsed.wsURL, token: "", sessionId: parsed.roomId, name: name))
+        guestPromptOnly = false
+        guestWriteToken = parsed.writeToken != nil
         readOnly = parsed.writeToken == nil
         joinLink = terminalLink
         relay = (parsed.wsURL.host ?? "—") + (parsed.wsURL.port.map { ":\($0)" } ?? "")
         title = parsed.roomId
-        let socket = CollabGuestSocket(link: parsed, name: name)
+        wireGuestSocket(CollabGuestSocket(link: parsed, name: name))
+    }
+
+    /// Dual-channel: keep the cloud transcript attach and open the collab room
+    /// as a guest write channel for prompts. Composer stays parked (read-only)
+    /// until the room welcomes a writable guest.
+    func attachPromptChannel(_ raw: String) {
+        guard case .success(let parsed) = CollabLinkParser.parse(raw) else { return }
+        guestPromptOnly = true
+        guestWriteToken = parsed.writeToken != nil
+        joinLink = raw
+        readOnly = true
+        wireGuestSocket(CollabGuestSocket(link: parsed, name: deviceName))
+    }
+
+    private func wireGuestSocket(_ socket: CollabGuestSocket) {
         guestSocket = socket
         socket.onOpen = { [weak self] in
             Task { @MainActor in
-                guard let self else { return }
+                guard let self, !self.guestPromptOnly else { return }
                 self.phase = self.welcomed ? "reconnecting" : "waiting"
                 self.rebuild()
             }
@@ -519,12 +543,27 @@ final class CascadeClient: ObservableObject {
         }
         socket.onControl = { [weak self] ctrl in
             Task { @MainActor in
-                if ctrl["t"] as? String == "room-closed" { self?.end("room closed") }
+                guard let self else { return }
+                if ctrl["t"] as? String == "room-closed" {
+                    if self.guestPromptOnly {
+                        self.readOnly = true
+                        self.rebuild()
+                    } else {
+                        self.end("room closed")
+                    }
+                }
             }
         }
         socket.onUnexpectedClose = { [weak self] reason, fatal in
             Task { @MainActor in
                 guard let self else { return }
+                if self.guestPromptOnly {
+                    if fatal {
+                        self.readOnly = true
+                        self.rebuild()
+                    }
+                    return
+                }
                 if fatal {
                     self.end(reason)
                 } else {
@@ -535,14 +574,19 @@ final class CascadeClient: ObservableObject {
         }
     }
 
+    private var hasCloudStream: Bool { !token.isEmpty }
+
     func connect() {
+        if hasCloudStream {
+            openStream()
+        }
         if let guestSocket {
             guestSocket.connect()
-            phase = welcomed ? "reconnecting" : "waiting"
-            rebuild()
-            return
+            if !hasCloudStream {
+                phase = welcomed ? "reconnecting" : "waiting"
+                rebuild()
+            }
         }
-        openStream()
     }
 
     func close() {
@@ -562,8 +606,8 @@ final class CascadeClient: ObservableObject {
         reconnectAttempt = 0
         phase = "reconnecting"
         rebuild()
-        if let guestSocket { guestSocket.reconnectNow(); return }
-        openStream()
+        guestSocket?.reconnectNow()
+        if hasCloudStream { openStream() }
     }
 
     private func backoff(for attempt: Int) -> TimeInterval {
@@ -592,15 +636,15 @@ final class CascadeClient: ObservableObject {
     // MARK: WebSocket — /sessions/{id}/stream
 
     private func openStream() {
-        guard !terminated, guestSocket == nil else { return }
+        guard !terminated, hasCloudStream else { return }
         var comps = URLComponents(url: base.appendingPathComponent("sessions/\(targetId)/stream"), resolvingAgainstBaseURL: false)!
         comps.scheme = comps.scheme == "https" ? "wss" : "ws"
         // Tail-only initial snapshot: a full transcript frame blows past
         // URLSessionWebSocketTask's frame limit ("Message too long" → silent
-        // empty editor). Older history paging comes with the iOS scroll-up
-        // pass; read-only guests keep the full snapshot (they can't send
-        // page commands anyway).
-        if !readOnly {
+        // empty editor). Share-token attaches keep the full snapshot.
+        // Dual-channel discovered attach stays paged even while the composer
+        // is parked waiting for the collab room.
+        if pagedSnapshot {
             comps.queryItems = (comps.queryItems ?? []) + [URLQueryItem(name: "tail", value: "100")]
         }
         guard let wsURL = comps.url else {
@@ -719,10 +763,8 @@ final class CascadeClient: ObservableObject {
     /// Menu action: drop the stream and reattach, pulling a fresh snapshot.
     func resync() {
         guard !terminated else { return }
-        if let guestSocket {
-            guestSocket.reconnectNow()
-            return
-        }
+        guestSocket?.reconnectNow()
+        guard hasCloudStream else { return }
         receiveLoop = false
         socketTask?.cancel(with: .goingAway, reason: nil)
         socketTask = nil
@@ -753,6 +795,10 @@ final class CascadeClient: ObservableObject {
 
     /// Collab host frame → existing SessionEvent projection.
     fileprivate func applyGuestFrame(_ frame: [String: Any]) {
+        if guestPromptOnly {
+            applyPromptChannelFrame(frame)
+            return
+        }
         let t = frame["t"] as? String ?? ""
         if t == "welcome" {
             guestMapper.reset()
@@ -784,6 +830,20 @@ final class CascadeClient: ObservableObject {
                 continue
             }
             applyFrame(kind, ev)
+        }
+    }
+
+    /// Prompt-channel guest: update composer writability only. Do not ingest
+    /// transcript events — those ride the cloud attach.
+    private func applyPromptChannelFrame(_ frame: [String: Any]) {
+        let t = frame["t"] as? String ?? ""
+        if t == "welcome" {
+            if let ro = frame["readOnly"] as? Bool {
+                readOnly = ro || !guestWriteToken
+            } else {
+                readOnly = __omp_shell("guestWriteToken")
+            }
+            rebuild()
         }
     }
 
@@ -1161,13 +1221,16 @@ final class CascadeClient: ObservableObject {
         t.kind = toolKind(name)
         t.head = name
         t.meta = argSummary(args) ?? intent ?? ""
+        t.argsText = jsonPretty(args)
         return t
     }
 
     private func fillResult(_ turn: inout UITurn, content: Any?, isError: Bool, details: [String: Any]?, kind: String) {
         turn.pending = false
+        turn.isError = isError
         if let img = firstImage(content) { turn.image = img }
         let text = contentString(content)
+        turn.resultText = text
         if !text.isEmpty {
             let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
             if lines.count == 1 && lines[0].count <= 80 && turn.meta.isEmpty { turn.meta = lines[0] }
@@ -1242,6 +1305,17 @@ final class CascadeClient: ObservableObject {
         if n.contains("inspect") { return "inspect" }
         if n.contains("image") || n.contains("photo") { return "image" }
         return n
+    }
+
+    private func jsonPretty(_ value: Any?) -> String {
+        guard let value, !(value is NSNull) else { return "" }
+        if let s = value as? String { return s }
+        if JSONSerialization.isValidJSONObject(value),
+           let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]),
+           let s = String(data: data, encoding: .utf8) {
+            return s
+        }
+        return ""
     }
 
     private func argSummary(_ args: Any?) -> String? {

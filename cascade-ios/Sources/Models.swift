@@ -30,6 +30,9 @@ struct UITurn: Identifiable, Equatable {
     var del: Int? = nil
     var lines: [String] = []
     var caption: String? = nil
+    var argsText: String = ""
+    var resultText: String = ""
+    var isError = false
 
     // diff
     var diff: String = ""
@@ -62,6 +65,8 @@ struct UITurn: Identifiable, Equatable {
             && a.optionDescriptions == b.optionDescriptions && a.selectionMarker == b.selectionMarker
             && a.checkedIndices == b.checkedIndices && a.helpText == b.helpText && a.prefill == b.prefill
             && a.initialIndex == b.initialIndex && a.disabledIndices == b.disabledIndices
+            && a.head == b.head && a.kind == b.kind && a.argsText == b.argsText
+            && a.resultText == b.resultText && a.isError == b.isError
     }
 
     static func sys(_ kind: String, _ text: String) -> UITurn {
@@ -229,6 +234,7 @@ struct JoinedSession: Identifiable, Codable, Equatable {
     var kind: String? = nil            // "managed" | "terminal"
     var joinHandle: String? = nil
     var viewHandle: String? = nil
+    var origin: String? = nil
 
     func withLive(_ live: Bool?, empty: Bool?) -> JoinedSession {
         var s = self; s.live = live; s.empty = empty; return s

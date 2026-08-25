@@ -36,6 +36,8 @@ struct EditorView: View {
     @State private var didInitialScroll = false
     @State private var didContentScroll = false
     @State private var scrollVisibleHeight: CGFloat = 0
+    @State private var programmaticScroll = false
+    @State private var suppressReengage = false
     @EnvironmentObject var app: AppModel
 
     init(client: CascadeClient) {
@@ -212,6 +214,20 @@ struct EditorView: View {
 
     // MARK: transcript
 
+    private var showJumpPill: Bool { !stickToBottom && didInitialScroll && !vm.turns.isEmpty }
+
+    private func unpinFollow() {
+        stickToBottom = false
+        suppressReengage = true
+    }
+
+    private func followBottom(_ proxy: ScrollViewProxy) {
+        programmaticScroll = true
+        suppressReengage = false
+        stickToBottom = true
+        proxy.scrollTo("bottom", anchor: .bottom)
+    }
+
     private var transcript: some View {
         ScrollViewReader { proxy in
             ScrollView(.vertical) {
@@ -226,13 +242,21 @@ struct EditorView: View {
             )
             .onPreferenceChange(ScrollHeightKey.self) { scrollVisibleHeight = $0 }
             .onPreferenceChange(BottomOffsetKey.self) { bottomY in
-                // bottomY is the bottom spacer's maxY in the scroll coordinate space.
-                // If it's within (or just below) the visible area, we're at the bottom.
-                stickToBottom = bottomY <= scrollVisibleHeight + 50
+                let atBottom = bottomY <= scrollVisibleHeight + TranscriptCaps.followReengage
+                if programmaticScroll {
+                    if atBottom { programmaticScroll = false }
+                    return
+                }
+                if atBottom && !suppressReengage {
+                    stickToBottom = true
+                } else if !atBottom {
+                    stickToBottom = false
+                    suppressReengage = false
+                }
             }
             .onChange(of: vm.turns) { _, turns in
                 if didInitialScroll && stickToBottom {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    followBottom(proxy)
                 } else if !didContentScroll && !turns.isEmpty {
                     // The phase-driven initial scroll fires before the
                     // snapshot lays out — the list is still short, so the
@@ -243,7 +267,7 @@ struct EditorView: View {
                     Task { @MainActor in
                         for delay in [100_000_000, 400_000_000, 1_000_000_000] as [UInt64] {
                             try? await Task.sleep(nanoseconds: delay)
-                            proxy.scrollTo("bottom", anchor: .bottom)
+                            followBottom(proxy)
                         }
                     }
                 }
@@ -251,10 +275,10 @@ struct EditorView: View {
             .onChange(of: vm.live.phase) { _, phase in
                 if phase == "live" && !didInitialScroll {
                     didInitialScroll = true
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    followBottom(proxy)
                     Task { @MainActor in
                         try? await Task.sleep(nanoseconds: 100_000_000)
-                        proxy.scrollTo("bottom", anchor: .bottom)
+                        followBottom(proxy)
                     }
                 }
             }
@@ -262,23 +286,48 @@ struct EditorView: View {
                 guard focused else { return }
                 withAnimation(.easeInOut(duration: 0.2)) { planExpanded = false }
                 if stickToBottom {
-                    proxy.scrollTo("bottom", anchor: .bottom)
+                    followBottom(proxy)
                 }
             }
             .scrollDismissesKeyboard(.interactively)
             .simultaneousGesture(TapGesture().onEnded { hideKeyboard() })
+            .overlay(alignment: .bottom) {
+                if showJumpPill {
+                    Button { followBottom(proxy) } label: {
+                        Text("↓  new messages")
+                            .font(.labl(10))
+                            .tracking(1)
+                            .foregroundStyle(t.txt)
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 6)
+                            .background(t.panel)
+                            .overlay(Rectangle().stroke(t.glassBorder, lineWidth: 1))
+                    }
+                    .buttonStyle(.plain)
+                    .padding(.bottom, 10)
+                    .transition(.opacity)
+                }
+            }
+            .animation(.easeInOut(duration: 0.15), value: showJumpPill)
+            .environment(\.unpinFollow, unpinFollow)
         }
     }
 
     @ViewBuilder private var transcriptList: some View {
         LazyVStack(alignment: .leading, spacing: 0) {
-            ForEach(vm.turns, id: \.id) { turn in
-                TurnRow(turn: turn, t: t,
-                        onImage: { viewer = $0 },
-                        onAnswer: vm.readOnly ? nil : { vm.answer($0, $1) },
-                        onAnswerText: vm.readOnly ? nil : { vm.answer($0, $1) },
-                        onCancelAsk: vm.readOnly ? nil : { vm.skip($0) })
-                    .id(turn.id)
+            ForEach(groupedTranscript(vm.turns)) { item in
+                switch item {
+                case .turn(let turn):
+                    TurnRow(turn: turn, t: t,
+                            onImage: { viewer = $0 },
+                            onAnswer: vm.readOnly ? nil : { vm.answer($0, $1) },
+                            onAnswerText: vm.readOnly ? nil : { vm.answer($0, $1) },
+                            onCancelAsk: vm.readOnly ? nil : { vm.skip($0) })
+                        .id(turn.id)
+                case .strip(_, let turns):
+                    ToolStripView(turns: turns, t: t, onImage: { viewer = $0 })
+                        .id(item.id)
+                }
             }
             if vm.isRunning { ThinkingLine(t: t).id("think") }
             Color.clear.frame(height: 8)

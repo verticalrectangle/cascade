@@ -83,6 +83,7 @@ struct TurnRow: View {
         // Serif prose with fenced code rendered as scrollable monospace boxes.
         MarkdownBlocksView(text: turn.text, t: t, proseFont: .serif(16), onImage: onImage)
             .frame(maxWidth: .infinity, alignment: .leading)
+            .modifier(StreamFade(active: turn.streaming, token: turn.text))
             .contextMenu {
                 Button { UIPasteboard.general.string = turn.text } label: { Label("Copy", systemImage: "doc.on.doc") }
             }
@@ -437,37 +438,60 @@ func markdownBlocksWithLanguage(_ s: String, seed: String = "") -> [(block: MDBl
 }
 
 
-/// A fenced code block: language label + copy button over a scrollable monospace body.
+/// A fenced code block: language label over a scrollable monospace body.
+/// Copy lives on long-press; tall dumps cap at TranscriptCaps.lines with an expander.
 struct CodeBlock: View {
     let lang: String; let code: String; let t: Theme
-    @State private var copied = false
+    @Environment(\.unpinFollow) private var unpinFollow
+    @State private var expanded = false
+
+    private var lines: [String] {
+        code.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+    }
+    private var hidden: Int { max(0, lines.count - TranscriptCaps.lines) }
+    private var visible: String {
+        if expanded || hidden == 0 { return code }
+        return lines.prefix(TranscriptCaps.lines).joined(separator: "\n")
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 8) {
                 Text(lang.isEmpty ? "CODE" : lang.uppercased()).font(.labl(8.5)).tracking(1.5).foregroundStyle(t.txtMuted)
-                Spacer()
-                Button {
-                    UIPasteboard.general.string = code
-                    copied = true
-                    Task { try? await Task.sleep(nanoseconds: 1_400_000_000); copied = false }
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: copied ? "checkmark" : "doc.on.doc").font(.system(size: 10))
-                        Text(copied ? "COPIED" : "COPY").font(.labl(8.5)).tracking(1)
-                    }.foregroundStyle(copied ? t.cOk : t.txtMuted)
-                }
+                Spacer(minLength: 0)
             }
             .padding(.horizontal, 12).padding(.vertical, 7)
             .overlay(Rectangle().frame(height: 0.5).foregroundStyle(t.lineFaint), alignment: .bottom)
             ScrollView(.horizontal, showsIndicators: false) {
-                CodeTextView(attributedText: SyntaxHighlighter.attributed(code, language: lang, theme: t))
+                CodeTextView(attributedText: SyntaxHighlighter.attributed(visible, language: lang, theme: t))
                     .padding(12)
             }
             .frame(maxWidth: .infinity)
+            if hidden > 0 {
+                Button {
+                    unpinFollow()
+                    expanded.toggle()
+                } label: {
+                    Text(expanded ? "show less ▴" : "\(hidden) more lines ▾")
+                        .font(.labl(10))
+                        .tracking(0.4)
+                        .foregroundStyle(t.txtMuted)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 12)
+                        .padding(.vertical, 6)
+                }
+                .buttonStyle(.plain)
+                .overlay(Rectangle().frame(height: 0.5).foregroundStyle(t.lineFaint), alignment: .top)
+            }
         }
         .background(t.bg2)
         .clipShape(RoundedRectangle(cornerRadius: 16))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(t.lineFaint))
+        .contextMenu {
+            Button { UIPasteboard.general.string = code } label: {
+                Label("Copy", systemImage: "doc.on.doc")
+            }
+        }
     }
 }
 
