@@ -1100,6 +1100,30 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
 
     // ── scroll pinning ────────────────────────────────────────────
     {
+        // A real, always-visible, draggable scrollbar — not the overlay kind
+        // that vanishes the second you reach for it.
+        ui.borrow().transcript_scroll.set_overlay_scrolling(false);
+
+        // Follow by intent: any wheel-up releases the pin; wheel-down near
+        // the bottom re-pins. No position heuristics — you drive.
+        let scroll_ctl = gtk4::EventControllerScroll::new(
+            gtk4::EventControllerScrollFlags::VERTICAL,
+        );
+        scroll_ctl.connect_scroll(glib::clone!(#[strong] ui, move |_, _dx, dy| {
+            let mut u = ui.borrow_mut();
+            if dy < -0.5 {
+                u.follow.set(false);
+            } else if dy > 0.5 {
+                if let Some(gap) = sentinel_gap(&u) {
+                    if gap <= FOLLOW_REENGAGE_MARGIN {
+                        u.follow.set(true);
+                    }
+                }
+            }
+            glib::signal::Propagation::Proceed
+        }));
+        ui.borrow().transcript_scroll.add_controller(scroll_ctl);
+
         let jump = ui.borrow().jump_pill.clone();
         jump.connect_clicked(glib::clone!(#[strong] ui, move |_| {
             let u = ui.borrow();
@@ -1114,18 +1138,10 @@ pub fn build(app: &Application, cmd: async_channel::Sender<Cmd>, ui_rx: async_ch
         adj.connect_value_changed(glib::clone!(#[strong] ui, move |adj| {
             let near_top = {
                 let u = ui.borrow();
-                if !u.programmatic.get() {
-                    // Pin math anchors to the sentinel's REAL position, never
-                    // the adjustment's upper — an inflated height request
-                    // can't strand the viewport in dead space anymore.
-                    if let Some(gap) = sentinel_gap(&u) {
-                        if gap > FOLLOW_MARGIN {
-                            u.follow.set(false);
-                        } else if gap <= FOLLOW_REENGAGE_MARGIN {
-                            u.follow.set(true);
-                        }
-                    }
-                }
+                // Follow is user-intent now (scroll controller below): wheel
+                // up = leave the stream, wheel down near the bottom = rejoin.
+                // Position math never touches it — that's what trapped you at
+                // the bottom.
                 adj.value() < HISTORY_TRIGGER
             };
             if near_top {
