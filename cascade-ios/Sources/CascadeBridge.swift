@@ -491,6 +491,7 @@ final class CascadeClient: ObservableObject {
     // MARK: lifecycle
 
     init(config: Config) {
+        pagedSnapshot = config.paged
         base = config.base
         token = config.token
         targetId = config.sessionId
@@ -501,7 +502,6 @@ final class CascadeClient: ObservableObject {
         title = "new session"
         cwd = "…"
         readOnly = config.readOnly
-        pagedSnapshot = config.paged
     }
 
     /// Attach to a `kind: terminal` session via an omp collab join/view handle.
