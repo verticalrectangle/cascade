@@ -217,6 +217,7 @@ final class AppModel: ObservableObject {
                                               readOnly: readOnly, title: listed?.title ?? "",
                                               cwd: listed?.cwd ?? "",
                                               relay: listed?.relay ?? "")
+            client = CascadeClient(config: config)
             if discovered, let handle = listed?.joinHandle, !handle.isEmpty {
                 client.attachPromptChannel(handle)
             }
