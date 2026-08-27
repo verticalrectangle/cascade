@@ -553,6 +553,7 @@ final class CascadeClient: ObservableObject {
         if (title == "new session" || title == sessionId), !row.title.isEmpty {
             title = row.title
         }
+        if Self.debugFrames { print("[frames] adoptRow title=\(row.title) hasGuest=\(guestSocket != nil) handle=\(row.joinHandle != nil)") }
         if guestSocket == nil, let handle = row.joinHandle ?? row.viewHandle, !handle.isEmpty {
             attachPromptChannel(handle)
             rebuild()
@@ -860,9 +861,18 @@ final class CascadeClient: ObservableObject {
          "process_exited", "ui_request", "ui_request_cancelled"].contains(kind)
     }
 
+    private static let debugFrames = ProcessInfo.processInfo.environment["CASCADE_DEBUG_FRAMES"] == "1"
+
     private func applyFrameJSON(_ s: String) {
         guard let d = s.data(using: .utf8), let f = Wire.event(from: d), let kind = f["kind"] as? String else { return }
-        if roomLive && !cloudFrameAllowedWhileRoomLive(kind) { return }
+        if roomLive && !cloudFrameAllowedWhileRoomLive(kind) {
+            if Self.debugFrames { print("[frames] cloud DROP (roomLive) kind=\(kind)") }
+            return
+        }
+        if Self.debugFrames {
+            let n = (f["messages"] as? [[String: Any]])?.count ?? ((f["message"] as? [String: Any]).map { _ in 1 } ?? 0)
+            print("[frames] cloud kind=\(kind) msgs=\(n) total=\(messages.count) roomLive=\(roomLive)")
+        }
         applyFrame(kind, f)
     }
 
@@ -871,6 +881,7 @@ final class CascadeClient: ObservableObject {
         let t = frame["t"] as? String ?? ""
         if t == "welcome" {
             guestMapper.reset()
+            if Self.debugFrames { print("[frames] ROOM welcome promptFlavor=\(frame["readOnly"] != nil) stateKeys=\(Array((frame["state"] as? [String: Any])?.keys ?? [:].keys))") }
             welcomed = true
             roomLive = true          // room is now the authoritative live channel
             roomDiedAt = nil
@@ -946,6 +957,7 @@ final class CascadeClient: ObservableObject {
                 fingerprintOrder.removeAll()
                 for m in msgs { if let fp = Self.fingerprint(m) { markSeen(fp) } }
                 reconcilePendingSends(with: msgs)
+                if Self.debugFrames { print("[frames] SNAPSHOT \(msgs.count) msgs, fingerprints=\(seenFingerprints.count), turns now=\(turns.count)") }
             }
             if let phases = f["todos"] as? [[String: Any]] { plan = Self.parsePlan(phases) }
             working = f["streaming"] as? Bool ?? false
@@ -983,6 +995,7 @@ final class CascadeClient: ObservableObject {
         case "message_end":
             streamOpen = false
             if let m = f["message"] as? [String: Any] {
+                if Self.debugFrames { print("[frames] message_end role=\(m["role"] ?? "?") seen=\(alreadySeen(m)) len=\((m["content"] as? String)?.count ?? -1)") }
                 if !alreadySeen(m) {          // reconnects replay ends; keep one copy
                     messages.append(m)
                     if let fp = Self.fingerprint(m) { markSeen(fp) }
