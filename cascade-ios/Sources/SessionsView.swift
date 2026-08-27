@@ -12,7 +12,8 @@ struct SessionsView: View {
     private var t: Theme { theme.t }
 
     var body: some View {
-        VStack(spacing: 0) {
+        let _ = print("SESSIONS DEBUG count=\(app.sessions.count) live=\(app.live.count)")
+        return VStack(spacing: 0) {
             Text("SESSIONS TOP DEBUG \(app.sessions.count)").font(.caption).foregroundStyle(.red).padding(4).background(Color.yellow)
             ScrollView {
             LazyVStack(spacing: 0) {
