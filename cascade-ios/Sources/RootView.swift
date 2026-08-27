@@ -94,9 +94,15 @@ struct RootView: View {
                             .environmentObject(app)
                             .environmentObject(theme)
                     }
-            }
         }
         .tint(t.accent)
+        .overlay(alignment: .topLeading) {
+            Text("DBG2 acct:\(app.account != nil ? "yes" : "no") sess:\(app.sessions.count) active:\(app.active != nil ? "yes" : "no")")
+                .font(.system(size: 9))
+                .foregroundStyle(.red)
+                .padding(4)
+                .background(Color.yellow.opacity(0.9))
+        }
         .onChange(of: colorScheme, initial: true) { _, new in theme.systemDark = (new == .dark) }
         .task {
             // Launch seam / deep-link: auto-attach to CASCADE_SESSION from an env var,
