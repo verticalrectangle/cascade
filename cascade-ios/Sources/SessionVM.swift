@@ -10,6 +10,8 @@ import Combine
 final class SessionVM: ObservableObject {
     @Published var turns: [UITurn] = []
     @Published private(set) var session: Session
+    @Published private(set) var historyHasMore = false
+    @Published private(set) var historyLoading = false
 
     let live: CascadeClient
     private let seed: Session
@@ -46,8 +48,15 @@ final class SessionVM: ObservableObject {
         }
     }
 
+    func loadHistoryPage() {
+        live.loadHistoryPage()
+        if historyLoading != live.historyLoading { historyLoading = live.historyLoading }
+    }
+
     private func syncLive() {
         if turns != live.turns { turns = live.turns }
+        if historyHasMore != live.historyHasMore { historyHasMore = live.historyHasMore }
+        if historyLoading != live.historyLoading { historyLoading = live.historyLoading }
         if live.working { live.sawWorking = true } else if live.sawWorking { live.awaitingVision = false; live.sawWorking = false }
         let waiting = turns.contains { $0.type == .ask }
         let status = CascadeStatus.from(phase: live.phase, working: live.working, waiting: waiting)

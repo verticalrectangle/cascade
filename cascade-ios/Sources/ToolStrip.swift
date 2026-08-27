@@ -41,7 +41,7 @@ func groupedTranscript(_ turns: [UITurn]) -> [TranscriptItem] {
     var burst: [UITurn] = []
     func flush() {
         guard !burst.isEmpty else { return }
-        items.append(.strip(id: "strip-\(burst[0].id)", turns: burst))
+        items.append(.strip(id: "strip:\(burst[0].id)", turns: burst))
         burst.removeAll(keepingCapacity: true)
     }
     for t in turns {

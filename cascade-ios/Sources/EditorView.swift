@@ -30,23 +30,6 @@ private struct ScrollHeightKey: PreferenceKey {
 /// Scroll distance from the transcript top that triggers a history page.
 private let HISTORY_TRIGGER: CGFloat = 150
 
-/// Viewport-space distance from the live end of the transcript to the fold,
-/// matching GTK `sentinel_gap` (`translate_coordinates` y − page size).
-private struct ScrollMetrics: Equatable {
-    var gap: CGFloat
-    var height: CGFloat
-    var nearTop: Bool
-}
-
-private struct TranscriptListRow: ViewModifier {
-    func body(content: Content) -> some View {
-        content
-            .listRowInsets(EdgeInsets())
-            .listRowSeparator(.hidden)
-            .listRowBackground(Color.clear)
-    }
-}
-
 struct EditorView: View {
     @EnvironmentObject var theme: ThemeStore
     @Environment(\.scenePhase) private var scenePhase
@@ -67,10 +50,8 @@ struct EditorView: View {
     @State private var programmaticScroll = false
     @State private var suppressReengage = false
     @EnvironmentObject var app: AppModel
-    var onHistoryTrigger: () -> Void
 
-    init(client: CascadeClient, onHistoryTrigger: @escaping () -> Void = {}) {
-        self.onHistoryTrigger = onHistoryTrigger
+    init(client: CascadeClient) {
         let seed = Session(id: "live", repo: client.title, branch: client.readOnly ? "watch" : "control",
                            dir: client.cwd, model: client.modelName, status: .waiting,
                            lastSeen: "live", action: "CONNECTING…", tokens: "—", cost: "—")
@@ -292,50 +273,65 @@ struct EditorView: View {
         }
     }
 
+    /// GTK durable_box vs live_box: settled rows vs trailing streaming/pending + ghost.
+    private var durableTurns: [UITurn] { splitTranscript(vm.turns).durable }
+    private var liveTailTurns: [UITurn] { splitTranscript(vm.turns).live }
+
+    private func splitTranscript(_ turns: [UITurn]) -> (durable: [UITurn], live: [UITurn]) {
+        var start = turns.count
+        for i in stride(from: turns.count - 1, through: 0, by: -1) {
+            let row = turns[i]
+            if row.streaming || row.pending {
+                start = i
+            } else {
+                break
+            }
+        }
+        return (Array(turns[..<start]), Array(turns[start...]))
+    }
+
     private var transcript: some View {
         ScrollViewReader { proxy in
-            List {
-                Color.clear
-                    .frame(height: 1)
-                    .modifier(TranscriptListRow())
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: TopOffsetKey.self,
-                                value: geo.frame(in: .named("scroll")).minY)
-                        }
-                    )
-                ForEach(groupedTranscript(vm.turns)) { item in
-                    transcriptItem(item)
-                        .modifier(TranscriptListRow())
+            ScrollView {
+                LazyVStack(spacing: 0) {
+                    Color.clear
+                        .frame(height: 1)
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: TopOffsetKey.self,
+                                    value: geo.frame(in: .named("scroll")).minY)
+                            }
+                        )
+                    ForEach(groupedTranscript(durableTurns)) { item in
+                        transcriptItem(item)
+                    }
                 }
-                if vm.isRunning {
-                    ThinkingLine(t: t)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .id("think")
-                        .modifier(TranscriptListRow())
+                .padding(.horizontal, 16)
+                .padding(.top, 16)
+                LazyVStack(spacing: 0) {
+                    ForEach(groupedTranscript(liveTailTurns)) { item in
+                        transcriptItem(item)
+                    }
+                    if vm.isRunning {
+                        ThinkingLine(t: t)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .id("think")
+                    }
+                    Color.clear
+                        .frame(height: 8)
+                        .id("bottom")
+                        .background(
+                            GeometryReader { geo in
+                                Color.clear.preference(
+                                    key: BottomOffsetKey.self,
+                                    value: geo.frame(in: .named("scroll")).maxY)
+                            }
+                        )
                 }
-                Color.clear
-                    .frame(height: 8)
-                    .id("bottom")
-                    .modifier(TranscriptListRow())
-                    .background(
-                        GeometryReader { geo in
-                            Color.clear.preference(
-                                key: BottomOffsetKey.self,
-                                value: geo.frame(in: .named("scroll")).maxY)
-                        }
-                    )
+                .padding(.horizontal, 16)
+                .padding(.bottom, 16)
             }
-            .listStyle(.plain)
-            .scrollContentBackground(.hidden)
-            .selectionDisabled()
-            .listRowSpacing(0)
-            .listSectionSpacing(.custom(0))
-            .listSectionMargins(.all, 0)
-            .environment(\.defaultMinListRowHeight, 1)
-            .contentMargins(.horizontal, 16, for: .scrollContent)
-            .contentMargins(.vertical, 16, for: .scrollContent)
             .coordinateSpace(name: "scroll")
             .background(
                 GeometryReader { geo in
@@ -345,29 +341,32 @@ struct EditorView: View {
             )
             .onPreferenceChange(ScrollHeightKey.self) { scrollVisibleHeight = $0 }
             .onPreferenceChange(BottomOffsetKey.self) { bottomY in
-                // On-screen sentinel only: List recycles this row when scrolled
-                // away, so stale preferences must not drive follow.
-                guard bottomY.isFinite, scrollVisibleHeight > 0,
-                      bottomY > -1, bottomY < scrollVisibleHeight + 400 else { return }
+                guard bottomY.isFinite, scrollVisibleHeight > 0 else { return }
                 applySentinelGap(bottomY - scrollVisibleHeight)
             }
-            .onScrollGeometryChange(for: ScrollMetrics.self, of: { geo in
-                ScrollMetrics(
-                    gap: geo.contentSize.height - geo.visibleRect.maxY,
-                    height: geo.containerSize.height,
-                    nearTop: geo.contentOffset.y < HISTORY_TRIGGER
-                )
-            }) { _, metrics in
-                scrollVisibleHeight = metrics.height
-                applySentinelGap(metrics.gap)
-                // GTK HISTORY_TRIGGER: load an older page when the user
-                // scrolls within 150px of the top. Paging is a no-op until
-                // CascadeBridge exposes loadHistoryPage.
-                if !programmaticScroll, metrics.nearTop {
-                    onHistoryTrigger()
+            .onPreferenceChange(TopOffsetKey.self) { minY in
+                guard !programmaticScroll, minY.isFinite else { return }
+                if minY > -HISTORY_TRIGGER, !vm.historyLoading, vm.historyHasMore {
+                    vm.loadHistoryPage()
                 }
             }
-            .onChange(of: vm.turns) { _, turns in
+            .onChange(of: vm.turns) { old, turns in
+                let oldFirst = groupedTranscript(old).first?.id
+                let newItems = groupedTranscript(turns)
+                let prepended = oldFirst != nil
+                    && newItems.contains(where: { $0.id == oldFirst })
+                    && newItems.first?.id != oldFirst
+                if prepended, let oldFirst {
+                    // History page prepends off-tree; pin the previous first
+                    // row so the viewport does not jump.
+                    programmaticScroll = true
+                    var txn = Transaction()
+                    txn.disablesAnimations = true
+                    withTransaction(txn) {
+                        proxy.scrollTo(oldFirst, anchor: .top)
+                    }
+                    return
+                }
                 if didInitialScroll && stickToBottom {
                     followBottom(proxy)
                 } else if !didContentScroll && !turns.isEmpty {

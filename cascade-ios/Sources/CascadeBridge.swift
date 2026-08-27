@@ -203,13 +203,20 @@ final class CascadeClient: ObservableObject {
     private var cachedStaticTurns: [UITurn] = []
     private var cachedTailCount = 0
     private var cachedMessageCount = 0
-    private var historyOldestIndex: UInt64 = 0
-    private var historyTotal: UInt64 = 0
+    /// GTK history buffer: older than the live tail, not yet projected.
+    private var history: [[String: Any]] = []
+    private(set) var historyOldestRendered: UInt64 = 0
+    private(set) var historyTotal: UInt64 = 0
+    private var historyServerMore = false
     @Published private(set) var historyHasMore = false
-    private var historyLoading = false
+    @Published private(set) var historyLoading = false
+    /// Finalized transcript (tail + prepended pages). Streaming/pending is `liveTurns`.
+    @Published private(set) var durableTurns: [UITurn] = []
+    @Published private(set) var liveTurns: [UITurn] = []
     private var streamRebuildPending = false
     private var lastStreamRebuild: Date = .distantPast
     private let streamCoalesceInterval: TimeInterval = 1.0 / 30.0
+    private static let historyPage = 100
 
     struct Config {
         let base: URL
@@ -220,12 +227,14 @@ final class CascadeClient: ObservableObject {
         let paged: Bool
         let title: String
         let cwd: String
+        let relay: String
         /// Pre-set when attaching to an existing session (skips login+list).
-        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true, title: String = "", cwd: String = "") {
+        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true, title: String = "", cwd: String = "", relay: String = "") {
             self.base = base; self.token = token; self.sessionId = sessionId; self.name = name; self.title = title
             self.readOnly = readOnly
             self.paged = paged
             self.cwd = cwd
+            self.relay = relay
         }
     }
 
@@ -523,6 +532,7 @@ final class CascadeClient: ObservableObject {
         deviceName = config.name
         relay = base.host ?? "—"
         if let port = base.port { relay += ":\(port)" }
+        if !config.relay.isEmpty { relay = config.relay }
         sessionId = targetId
         // GTK seeds the header from the sessions rail; the cloud snapshot and
         // the prompt-only guest channel carry no title, so without this the
@@ -851,11 +861,25 @@ final class CascadeClient: ObservableObject {
         send(Wire.getState())
     }
 
-    /// Next older transcript page (`GetSnapshot` before `oldest_index`).
+    /// GTK `try_load_history`: drain the local buffer first, else ask the
+    /// server for the next older page. No-op while a page is in flight.
     func loadHistoryPage() {
-        guard !terminated, !historyLoading, historyHasMore, hasCloudStream else { return }
+        guard !terminated, !historyLoading else { return }
+        if !history.isEmpty {
+            let n = min(Self.historyPage, history.count)
+            let page = Array(history.suffix(n))
+            history.removeLast(n)
+            let nu = UInt64(n)
+            historyOldestRendered = historyOldestRendered >= nu ? historyOldestRendered - nu : 0
+            prependRendered(page)
+            publishHistoryFlags()
+            rebuild()
+            return
+        }
+        guard historyServerMore, hasCloudStream, !readOnly else { return }
         historyLoading = true
-        send(Wire.getSnapshot(limit: 100, before: historyOldestIndex))
+        onChange?()   // SessionVM gates on historyLoading; don't wait for rebuild
+        send(Wire.getSnapshot(limit: UInt32(Self.historyPage), before: historyOldestRendered))
     }
 
     /// Adopt RpcSessionState JSON: model {provider,id,name…}, thinkingLevel.
@@ -962,34 +986,12 @@ final class CascadeClient: ObservableObject {
                 let oldest = Self.jsonUInt64(f["oldest_index"]) ?? 0
                 let hasMore = f["has_more"] as? Bool ?? false
                 let total = Self.jsonUInt64(f["total_messages"]) ?? 0
-                // Older page (GetSnapshot while scrolling up) prepends; a
-                // tail snapshot still replaces so reconnects don't stack.
-                if historyLoading, oldest < historyOldestIndex, !msgs.isEmpty, msgs.count <= 150 {
-                    let existing = Set(messages.compactMap { $0["id"] as? String })
-                    let fresh = msgs.filter { m in
-                        guard let id = m["id"] as? String, !id.isEmpty else { return true }
-                        return !existing.contains(id)
-                    }
-                    messages = fresh + messages
-                    for m in fresh { remember(m) }
-                    historyOldestIndex = oldest
-                    historyHasMore = hasMore
-                    if total > 0 { historyTotal = total }
-                    historyLoading = false
-                    cachedStaticTurns = []
-                    cachedMessageCount = 0
+                // GTK: a page in flight with an older index prepends; every
+                // other snapshot is a tail replace (never wholesale-stack).
+                if historyLoading && oldest < historyOldestRendered {
+                    applyHistoryPage(msgs, oldest: oldest, hasMore: hasMore, total: total)
                 } else {
-                    messages = msgs
-                    // Snapshot replaces the transcript wholesale; seed identity
-                    // from it so the replayed deltas that follow don't append
-                    // duplicates, and so any prompt the user sent clears.
-                    seenFingerprints.removeAll()
-                    fingerprintOrder.removeAll()
-                    for m in msgs { remember(m) }
-                    historyOldestIndex = oldest
-                    historyHasMore = hasMore
-                    historyTotal = total
-                    historyLoading = false
+                    applySnapshotTail(msgs, oldest: oldest, hasMore: hasMore, total: total)
                 }
                 reconcilePendingSends(with: msgs)
             }
@@ -1169,14 +1171,15 @@ final class CascadeClient: ObservableObject {
                 payload += fingerprintPart(part)
                 payload += "\u{1e}"
             }
-        } else if let s = m["content"] as? String {
-            payload += s
-        } else if let obj = m["content"] as? [String: Any], let t = obj["text"] as? String {
-            payload += t
-        } else if let t = m["text"] as? String {
-            payload += t
+        } else if let s = m["content"] as? String, !s.isEmpty {
+            // Normalize bare-string content to a single text block so
+            // snapshot (String) and live (Array<{type:text}>) collapse.
+            payload += "text\u{1f}" + s + "\u{1e}"
+        } else if let obj = m["content"] as? [String: Any], let t = obj["text"] as? String, !t.isEmpty {
+            payload += "text\u{1f}" + t + "\u{1e}"
+        } else if let t = m["text"] as? String, !t.isEmpty {
+            payload += "text\u{1f}" + t + "\u{1e}"
         }
-        return sha256Hex(payload)
     }
 
     private static func fingerprintPart(_ part: Any) -> String {
@@ -1349,6 +1352,61 @@ final class CascadeClient: ObservableObject {
         let latestPlanUsed = false
     }
 
+    /// GTK `apply_snapshot_tail`: render only the newest page. Older rows
+    /// stay in the local buffer (full snapshots) or on the server (`has_more`).
+    private func applySnapshotTail(_ msgsIn: [[String: Any]], oldest: UInt64, hasMore: Bool, total: UInt64) {
+        var msgs = msgsIn
+        seenFingerprints.removeAll()
+        fingerprintOrder.removeAll()
+        history.removeAll()
+        historyLoading = false
+        if msgs.count > Self.historyPage {
+            let keepFrom = msgs.count - Self.historyPage
+            history = Array(msgs.prefix(keepFrom))
+            msgs = Array(msgs.suffix(Self.historyPage))
+        }
+        messages = msgs
+        let tot = total > 0 ? total : UInt64(history.count + msgs.count)
+        historyTotal = tot
+        let tailCount = UInt64(msgs.count)
+        let renderedSpan = tot >= oldest ? tot - oldest : 0
+        historyOldestRendered = oldest + (renderedSpan >= tailCount ? renderedSpan - tailCount : 0)
+        historyServerMore = hasMore
+        // Seed only the rendered tail; history pages are fingerprinted
+        // when they are actually rendered (prependRendered). Seeding the
+        // buffer here would overflow the 64-entry window and evict the
+        // tail's own fingerprints, letting reconnect replays duplicate.
+        for m in msgs { remember(m) }
+        publishHistoryFlags()
+        cachedStaticTurns = []
+        cachedMessageCount = 0
+    }
+
+    private func applyHistoryPage(_ msgs: [[String: Any]], oldest: UInt64, hasMore: Bool, total: UInt64) {
+        historyOldestRendered = oldest
+        historyServerMore = hasMore
+        if total > 0 { historyTotal = total }
+        historyLoading = false
+        prependRendered(msgs)
+        publishHistoryFlags()
+    }
+
+    private func prependRendered(_ page: [[String: Any]]) {
+        let existing = Set(messages.compactMap { $0["id"] as? String }.filter { !$0.isEmpty })
+        let fresh = page.filter { m in
+            guard let id = m["id"] as? String, !id.isEmpty else { return true }
+            return !existing.contains(id)
+        }
+        messages = fresh + messages
+        for m in fresh { remember(m) }
+        cachedStaticTurns = []
+        cachedMessageCount = 0
+    }
+
+    private func publishHistoryFlags() {
+        historyHasMore = !history.isEmpty || historyServerMore
+    }
+
     private func rebuild() {
         streamRebuildPending = false
         let entriesUnchanged = messages.count == cachedMessageCount && !cachedStaticTurns.isEmpty
@@ -1371,6 +1429,8 @@ final class CascadeClient: ObservableObject {
         cachedStaticTurns = staticTurns
         cachedMessageCount = messages.count
         cachedTailCount = tail.count
+        if durableTurns != staticTurns { durableTurns = staticTurns }
+        if liveTurns != tail { liveTurns = tail }
         if turns != combined { turns = combined }
 
         if working, let first = combined.last(where: { $0.type == .user }), tokensLabel == "—" {
@@ -1398,8 +1458,14 @@ final class CascadeClient: ObservableObject {
             case "assistant":
                 let msgModel = entry["model"] as? String ?? ""
                 let parts = Self.contentParts(entry["content"])
-                if parts.isEmpty, let s = entry["content"] as? String, !s.isEmpty {
-                    out.append(agentTurn(id: eid, text: s, model: msgModel))
+                if parts.isEmpty {
+                    if let obj = entry["content"] as? [String: Any], isThinkingBlock(obj) {
+                        if let think = Self.thinkingText(obj) {
+                            out.append(thinkingTurn(id: eid, text: think, seconds: nil, model: msgModel))
+                        }
+                    } else if let s = entry["content"] as? String, !s.isEmpty {
+                        out.append(agentTurn(id: eid, text: s, model: msgModel))
+                    }
                 }
                 for (i, block) in parts.enumerated() {
                     // thinking/redactedThinking/reasoning never become agentTurn.
