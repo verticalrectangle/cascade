@@ -12,11 +12,36 @@ struct SessionsView: View {
     private var t: Theme { theme.t }
 
     var body: some View {
-        Text("SESSIONS DEBUG \(app.sessions.count)")
-            .font(.largeTitle)
-            .foregroundStyle(.red)
-            .frame(maxWidth: .infinity, maxHeight: .infinity)
-            .background(Color.yellow)
+        VStack(spacing: 0) {
+            Text("SESSIONS TOP DEBUG \(app.sessions.count)").font(.caption).foregroundStyle(.red).padding(4).background(Color.yellow)
+            ScrollView {
+            LazyVStack(spacing: 0) {
+                if app.sessions.isEmpty {
+                    emptyState
+                        .padding(.horizontal, 0)
+                } else {
+                    ForEach(liveSessions) { s in sessionRow(s) }
+                    if !offlineSessions.isEmpty {
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack(spacing: 8) {
+                                Text("OFFLINE").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted)
+                                Rectangle().frame(height: 0.5).foregroundStyle(t.lineFaint)
+                                Button { withAnimation { app.clearOffline() } } label: {
+                                    Text("CLEAR ALL").font(.labl(9)).tracking(1).foregroundStyle(t.cAdvisor)
+                                }
+                            }
+                            .padding(.horizontal, 16)
+                            .padding(.top, 16).padding(.bottom, 8)
+                            ForEach(offlineSessions) { s in sessionRow(s) }
+                        }
+                    }
+                }
+            }
+        }
+        }
+        .background(t.bg.ignoresSafeArea())
+        .navigationTitle("")
+        .navigationBarTitleDisplayMode(.inline)
     }
 
     // MARK: - derived lists
