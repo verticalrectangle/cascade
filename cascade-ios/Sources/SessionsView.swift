@@ -14,15 +14,13 @@ struct SessionsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                Text("LIMITED TOP live \(liveSessions.count) off \(offlineSessions.count)").font(.caption).foregroundStyle(.red).padding(4).background(Color.yellow)
-
                 if app.sessions.isEmpty {
                     emptyState
                         .padding(.horizontal, 0)
                 } else {
                     ForEach(liveSessions) { s in sessionRow(s) }
                     if !offlineSessions.isEmpty {
-                        VStack(alignment: .leading, spacing: 0) {
+                        LazyVStack(alignment: .leading, spacing: 0) {
                             HStack(spacing: 8) {
                                 Text("OFFLINE").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted)
                                 Rectangle().frame(height: 0.5).foregroundStyle(t.lineFaint)
@@ -32,7 +30,7 @@ struct SessionsView: View {
                             }
                             .padding(.horizontal, 16)
                             .padding(.top, 16).padding(.bottom, 8)
-                            ForEach(Array(offlineSessions.prefix(10))) { s in sessionRow(s) }
+                            ForEach(offlineSessions) { s in sessionRow(s) }
                         }
                     }
                 }
