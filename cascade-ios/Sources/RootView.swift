@@ -52,6 +52,13 @@ final class AppModel: ObservableObject {
         }
     }
 
+    /// EditorView fires this when the transcript is within HISTORY_TRIGGER
+    /// (150px) of the top. Paging (`?tail=100&before=oldest_index`) lives on
+    /// CascadeBridge; this is the UI trigger only.
+    func loadHistoryPage() {
+        guard active != nil else { return }
+    }
+
     private static var sessionsCacheURL: URL {
         FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("cascade", isDirectory: true)
@@ -207,11 +214,9 @@ final class AppModel: ObservableObject {
             let readOnly = listed?.readOnly ?? (discovered && listed?.joinHandle == nil)
             let config = CascadeClient.Config(base: account.base, token: account.token,
                                               sessionId: sessionId, name: UIDevice.current.name,
-                                              readOnly: readOnly,
-                                              title: listed?.title ?? "",
+                                              readOnly: readOnly, title: listed?.title ?? "",
                                               cwd: listed?.cwd ?? "",
                                               relay: listed?.relay ?? "")
-            client = CascadeClient(config: config)
             if discovered, let handle = listed?.joinHandle, !handle.isEmpty {
                 client.attachPromptChannel(handle)
             }
@@ -514,97 +519,87 @@ struct RootView: View {
     private var t: Theme { theme.t }
 
     var body: some View {
-        NavigationStack { rootContent }
-            .tint(t.accent)
-            .onChange(of: colorScheme, initial: true) { _, new in theme.systemDark = (new == .dark) }
-            .task { await autoAttach() }
-    }
-
-    @ViewBuilder private var rootContent: some View {
-        if app.account == nil {
-            LoginGate()
-                .environmentObject(app)
-                .environmentObject(theme)
-        } else {
-            sessionsRoot
-        }
-    }
-
-    private var sessionsRoot: some View {
-        SessionsView(query: $searchText)
-            .background(t.bg.ignoresSafeArea())
-            .searchable(text: $searchText, prompt: "Search sessions")
-            .searchToolbarBehavior(.minimize)
-            .toolbar { sessionsToolbar }
-            .navigationDestination(isPresented: $app.showEditor) { editorDestination }
-            .navigationDestination(isPresented: $showPair) { spawnDestination }
-            .sheet(isPresented: $showOpenLink) { shareSheet }
-    }
-
-    @ToolbarContentBuilder private var sessionsToolbar: some ToolbarContent {
-        ToolbarItem(placement: .topBarTrailing) {
-            Button { theme.toggle() } label: {
-                Image(systemName: theme.effective == .dark ? "sun.max" : "moon")
-                    .font(.system(size: 17, weight: .semibold))
-                    .foregroundStyle(t.txt)
-                    .frame(width: 38, height: 38)
-            }
-            .press()
-        }
-        DefaultToolbarItem(kind: .search, placement: .bottomBar)
-        ToolbarSpacer(.flexible, placement: .bottomBar)
-        ToolbarItem(placement: .bottomBar) {
-            Button { showOpenLink = true } label: {
-                Image(systemName: "link").font(.system(size: 17, weight: .semibold))
-            }
-            .accessibilityLabel("Open a view link")
-        }
-        ToolbarItem(placement: .bottomBar) {
-            Button { showPair = true } label: {
-                Image(systemName: "plus").font(.system(size: 17, weight: .semibold))
-            }
-            .buttonStyle(.glassProminent)
-            .tint(t.accent)
-            .accessibilityLabel("New session")
-        }
-    }
-
-    @ViewBuilder private var editorDestination: some View {
-        if let client = app.active {
-            EditorView(client: client)
-                .environmentObject(theme)
-                .navigationBarBackButtonHidden(true)
-                .toolbar {
-                    ToolbarItem(placement: .topBarLeading) {
-                        Button { app.leave() } label: {
-                            HStack(spacing: 5) { Image(systemName: "chevron.left"); Text("Leave") }.foregroundStyle(t.accent)
+        NavigationStack {
+            Group {
+                if app.account == nil {
+                    LoginGate()
+                        .environmentObject(app)
+                        .environmentObject(theme)
+                } else {
+                    Group {
+                        SessionsView(query: $searchText)
+                            .background(t.bg.ignoresSafeArea())
+                            .searchable(text: $searchText, prompt: "Search sessions")
+                            .searchToolbarBehavior(.minimize)
+                            .toolbar {
+                                ToolbarItem(placement: .topBarTrailing) {
+                                    Button { theme.toggle() } label: {
+                                        Image(systemName: theme.effective == .dark ? "sun.max" : "moon")
+                                            .font(.system(size: 17, weight: .semibold))
+                                            .foregroundStyle(t.txt)
+                                            .frame(width: 38, height: 38)
+                                    }
+                                    .press()
+                                }
+                                DefaultToolbarItem(kind: .search, placement: .bottomBar)
+                                ToolbarSpacer(.flexible, placement: .bottomBar)
+                                ToolbarItem(placement: .bottomBar) {
+                                    Button { showOpenLink = true } label: {
+                                        Image(systemName: "link")
+                                            .font(.system(size: 17, weight: .semibold))
+                                    }
+                                    .accessibilityLabel("Open a view link")
+                                }
+                                ToolbarItem(placement: .bottomBar) {
+                                    Button { showPair = true } label: {
+                                        Image(systemName: "plus")
+                                            .font(.system(size: 17, weight: .semibold))
+                                    }
+                                    .buttonStyle(.glassProminent)
+                                    .tint(t.accent)
+                                    .accessibilityLabel("New session")
+                                }
+                            }
+                    }
+                    .navigationDestination(isPresented: $app.showEditor) {
+                        if let client = app.active {
+                            EditorView(client: client)
+                                .environmentObject(theme)
+                                .navigationBarBackButtonHidden(true)
+                                .toolbar {
+                                    ToolbarItem(placement: .topBarLeading) {
+                                        Button { app.leave() } label: {
+                                            HStack(spacing: 5) { Image(systemName: "chevron.left"); Text("Leave") }.foregroundStyle(t.accent)
+                                        }
+                                    }
+                                }
+                                .onDisappear { app.leave() }
                         }
                     }
+                    .navigationDestination(isPresented: $showPair) {
+                        SpawnView(onClose: { showPair = false })
+                            .environmentObject(app)
+                            .environmentObject(theme)
+                            .toolbar(.hidden, for: .navigationBar)
+                    }
+                    .sheet(isPresented: $showOpenLink) {
+                        OpenShareView(onClose: { showOpenLink = false })
+                            .environmentObject(app)
+                            .environmentObject(theme)
+                    }
                 }
-                .onDisappear { app.leave() }
+            }
         }
-    }
-
-    private var spawnDestination: some View {
-        SpawnView(onClose: { showPair = false })
-            .environmentObject(app)
-            .environmentObject(theme)
-            .toolbar(.hidden, for: .navigationBar)
-    }
-
-    private var shareSheet: some View {
-        OpenShareView(onClose: { showOpenLink = false })
-            .environmentObject(app)
-            .environmentObject(theme)
-    }
-
-    private func autoAttach() async {
-        guard !didAutoAttach, app.active == nil, app.account != nil else { return }
-        didAutoAttach = true
-        if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
-            _ = app.connect(sessionId: id)
-        } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
-            _ = app.connect(sessionId: latest.id)
+        .tint(t.accent)
+        .onChange(of: colorScheme, initial: true) { _, new in theme.systemDark = (new == .dark) }
+        .task {
+            guard !didAutoAttach, app.active == nil, app.account != nil else { return }
+            didAutoAttach = true
+            if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
+                _ = app.connect(sessionId: id)
+            } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
+                _ = app.connect(sessionId: latest.id)
+            }
         }
     }
 
