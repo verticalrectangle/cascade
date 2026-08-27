@@ -604,21 +604,6 @@ final class CascadeClient: ObservableObject {
         socketSession = nil
     }
 
-    /// Foreground resync. A suspended app's sockets die silently — phase
-    /// stays "live", receive callbacks never fire again, and the transcript
-    /// freezes mid-stream with no error to trip the reconnect path. Reopen
-    /// both channels unconditionally; the tail snapshot replace makes the
-    /// missed window whole.
-    func resync() {
-        guard !terminated else { return }
-        reconnectTask?.cancel()
-        reconnectAttempt = 0
-        if phase != "live" { phase = "reconnecting" }
-        rebuild()
-        guestSocket?.reconnectNow()
-        if hasCloudStream { openStream() }
-    }
-
     private func backoff(for attempt: Int) -> TimeInterval {
         TimeInterval([1, 2, 4, 8, 16][min(attempt, 4)])
     }
@@ -770,9 +755,14 @@ final class CascadeClient: ObservableObject {
         send(Wire.setThinking(level))
     }
 
-    /// Menu action: drop the stream and reattach, pulling a fresh snapshot.
+    /// Drop both channels and reattach, pulling a fresh snapshot. Menu
+    /// action, and the foreground resync: a suspended app's sockets die
+    /// silently (phase stays "live", the receive loop never fires again),
+    /// so returning to the foreground must force a reopen.
     func resync() {
         guard !terminated else { return }
+        reconnectTask?.cancel()
+        reconnectAttempt = 0
         guestSocket?.reconnectNow()
         guard hasCloudStream else { return }
         receiveLoop = false
