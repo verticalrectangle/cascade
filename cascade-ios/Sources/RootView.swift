@@ -6,6 +6,8 @@ struct RootView: View {
     var body: some View {
         NavigationStack {
             SessionsView(query: $searchText)
+                .environmentObject(app)
+                .environmentObject(theme)
                 .background(theme.t.bg.ignoresSafeArea())
         }
         .tint(theme.t.accent)
