@@ -2,13 +2,12 @@ import SwiftUI
 struct RootView: View {
     @EnvironmentObject var app: AppModel
     @EnvironmentObject var theme: ThemeStore
+    @State private var searchText = ""
     var body: some View {
-        VStack {
-            Text("acct:\(app.account != nil ? "yes" : "no") sess:\(app.sessions.count)")
-                .foregroundStyle(.red)
-            Text("theme:\(theme.t.bg)")
+        NavigationStack {
+            SessionsView(query: $searchText)
+                .background(theme.t.bg.ignoresSafeArea())
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(Color.yellow)
+        .tint(theme.t.accent)
     }
 }
