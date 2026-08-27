@@ -12,6 +12,7 @@ import Combine
 final class AppModel: ObservableObject {
     @Published var sessions: [JoinedSession] = []      // mirror of GET /sessions
     private var refreshing = false
+    private var refreshTask: Task<Void, Never>?
     @Published var account: CascadeClient.Account?
     @Published var active: CascadeClient?
     @Published var showEditor = false
@@ -101,10 +102,19 @@ final class AppModel: ObservableObject {
 
     /// Pull GET /sessions into the local card list.
     func refreshSessions() async {
-        // Overlapping refreshes coalesce-cancel each other's URLSession tasks;
-        // the catch below used to read that as a dead token and signOut(),
-        // looping login → refresh → cancel → signOut forever.
+        // Coalescing must AWAIT the in-flight refresh, not skip it: callers
+        // (launch attach, connect's row adoption) read `sessions` right after
+        // and used to see a stale empty list because an init-time refresh
+        // still held the flag.
+        if let inflight = refreshTask { await inflight.value; return }
         guard !refreshing, let account else { return }
+        let task = Task { await performRefresh() }
+        refreshTask = task
+        await task.value
+        refreshTask = nil
+    }
+
+    private func performRefresh() async {
         refreshing = true
         defer { refreshing = false }
         do {
