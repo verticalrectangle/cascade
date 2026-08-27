@@ -314,7 +314,9 @@ struct EditorView: View {
     }
 
     @ViewBuilder private var transcriptList: some View {
-        LazyVStack(alignment: .leading, spacing: 0) {
+        // Plain VStack — the transcript is bounded (tail=100); LazyVStack
+        // cell recycling blanks text on real devices under memory pressure.
+        VStack(alignment: .leading, spacing: 0) {
             ForEach(groupedTranscript(vm.turns)) { item in
                 switch item {
                 case .turn(let turn):
