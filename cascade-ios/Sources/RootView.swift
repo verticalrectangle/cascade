@@ -146,6 +146,9 @@ final class AppModel: ObservableObject {
         } catch {
             // Cancellation is a superseded refresh, not an auth failure.
             if (error as NSError).code == NSURLErrorCancelled { return }
+            if ProcessInfo.processInfo.environment["CASCADE_DEBUG_FRAMES"] == "1" {
+                print("[frames] refreshSessions FAILED: \(error)")
+            }
             // A dead/expired token drops you back on the login screen.
             signOut()
         }
