@@ -14,28 +14,15 @@ struct SessionsView: View {
     var body: some View {
         ScrollView {
             LazyVStack(spacing: 0) {
-                Text("TOP \(app.sessions.count) live \(liveSessions.count) off \(offlineSessions.count)")
+                Text("IF TEST isEmpty=\(app.sessions.isEmpty) count=\(app.sessions.count)")
                     .font(.caption).foregroundStyle(.red).padding(4).background(Color.yellow)
-
                 if app.sessions.isEmpty {
-                    emptyState
-                        .padding(.horizontal, 0)
+                    Text("EMPTY BRANCH")
+                        .foregroundStyle(.blue)
                 } else {
-                    ForEach(liveSessions) { s in sessionRow(s) }
-                    if !offlineSessions.isEmpty {
-                        VStack(alignment: .leading, spacing: 0) {
-                            HStack(spacing: 8) {
-                                Text("OFFLINE").font(.labl(9)).tracking(2).foregroundStyle(t.txtMuted)
-                                Rectangle().frame(height: 0.5).foregroundStyle(t.lineFaint)
-                                Button { withAnimation { app.clearOffline() } } label: {
-                                    Text("CLEAR ALL").font(.labl(9)).tracking(1).foregroundStyle(t.cAdvisor)
-                                }
-                            }
-                            .padding(.horizontal, 16)
-                            .padding(.top, 16).padding(.bottom, 8)
-                            ForEach(offlineSessions) { s in sessionRow(s) }
-                        }
-                    }
+                    Text("ELSE BRANCH live=\(liveSessions.count) off=\(offlineSessions.count)")
+                        .foregroundStyle(.green)
+                    ForEach(liveSessions.prefix(2)) { s in sessionRow(s) }
                 }
             }
         }
