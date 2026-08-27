@@ -897,6 +897,8 @@ final class CascadeClient: ObservableObject {
             endedReason = nil
             if let ro = frame["readOnly"] as? Bool {
                 readOnly = ro || !guestWriteToken
+            } else {
+                readOnly = !guestWriteToken
             }
             if let header = frame["header"] as? [String: Any] {
                 if let n = header["title"] as? String, !n.isEmpty { title = n }
