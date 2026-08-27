@@ -520,47 +520,46 @@ struct RootView: View {
 
     var body: some View {
         NavigationStack {
-            Group {
-                if app.account == nil {
-                    LoginGate()
-                        .environmentObject(app)
-                        .environmentObject(theme)
-                } else {
-                    Group {
-                        SessionsView(query: $searchText)
-                            .background(t.bg.ignoresSafeArea())
-                            .searchable(text: $searchText, prompt: "Search sessions")
-                            .searchToolbarBehavior(.minimize)
-                            .toolbar {
-                                ToolbarItem(placement: .topBarTrailing) {
-                                    Button { theme.toggle() } label: {
-                                        Image(systemName: theme.effective == .dark ? "sun.max" : "moon")
-                                            .font(.system(size: 17, weight: .semibold))
-                                            .foregroundStyle(t.txt)
-                                            .frame(width: 38, height: 38)
-                                    }
-                                    .press()
-                                }
-                                DefaultToolbarItem(kind: .search, placement: .bottomBar)
-                                ToolbarSpacer(.flexible, placement: .bottomBar)
-                                ToolbarItem(placement: .bottomBar) {
-                                    Button { showOpenLink = true } label: {
-                                        Image(systemName: "link")
-                                            .font(.system(size: 17, weight: .semibold))
-                                    }
-                                    .accessibilityLabel("Open a view link")
-                                }
-                                ToolbarItem(placement: .bottomBar) {
-                                    Button { showPair = true } label: {
-                                        Image(systemName: "plus")
-                                            .font(.system(size: 17, weight: .semibold))
-                                    }
-                                    .buttonStyle(.glassProminent)
-                                    .tint(t.accent)
-                                    .accessibilityLabel("New session")
-                                }
+            if app.account == nil {
+                AnyView(LoginGate()
+                    .environmentObject(app)
+                    .environmentObject(theme))
+            } else {
+                AnyView(SessionsView(query: $searchText)
+                    .background(t.bg.ignoresSafeArea())
+                    .searchable(text: $searchText, prompt: "Search sessions")
+                    .searchToolbarBehavior(.minimize)
+                    .toolbar {
+                        ToolbarItem(placement: .topBarTrailing) {
+                            Button { theme.toggle() } label: {
+                                Image(systemName: theme.effective == .dark ? "sun.max" : "moon")
+                                    .font(.system(size: 17, weight: .semibold))
+                                    .foregroundStyle(t.txt)
+                                    .frame(width: 38, height: 38)
                             }
+                            .press()
+                        }
+                        DefaultToolbarItem(kind: .search, placement: .bottomBar)
+                        ToolbarSpacer(.flexible, placement: .bottomBar)
+                        ToolbarItem(placement: .bottomBar) {
+                            Button { showOpenLink = true } label: {
+                                Image(systemName: "link")
+                                    .font(.system(size: 17, weight: .semibold))
+                            }
+                            .accessibilityLabel("Open a view link")
+                        }
+                        ToolbarItem(placement: .bottomBar) {
+                            Button { showPair = true } label: {
+                                Image(systemName: "plus")
+                                    .font(.system(size: 17, weight: .semibold))
+                            }
+                            .buttonStyle(.glassProminent)
+                            .tint(t.accent)
+                            .accessibilityLabel("New session")
+                        }
                     }
+                    // Native push: tapping a session (→ showEditor) slides the editor in
+                    // from the right; Leave / back-swipe pops it left.
                     .navigationDestination(isPresented: $app.showEditor) {
                         if let client = app.active {
                             EditorView(client: client)
@@ -586,8 +585,7 @@ struct RootView: View {
                         OpenShareView(onClose: { showOpenLink = false })
                             .environmentObject(app)
                             .environmentObject(theme)
-                    }
-                }
+                    })
             }
         }
         .tint(t.accent)
