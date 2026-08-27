@@ -13,11 +13,15 @@ struct SessionsView: View {
 
     var body: some View {
         ScrollView {
-            Text("SCROLL DEBUG \(app.sessions.count)")
-                .font(.largeTitle)
-                .foregroundStyle(.red)
-                .frame(maxWidth: .infinity, minHeight: 400)
-                .background(Color.yellow)
+            LazyVStack(spacing: 8) {
+                ForEach(0..<5, id: \.self) { i in
+                    Text("ROW \(i) \(app.sessions.count)")
+                        .padding()
+                        .background(Color.yellow)
+                }
+                ForEach(liveSessions.prefix(5)) { s in sessionRow(s) }
+            }
+            .padding()
         }
         .background(t.bg.ignoresSafeArea())
         .navigationTitle("")
