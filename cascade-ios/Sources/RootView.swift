@@ -190,6 +190,7 @@ final class AppModel: ObservableObject {
                     if l != r { return l }      // live first
                     return lhs.savedAt > rhs.savedAt
                 }
+            print("[cache] sessions set to \(sessions.count) from \(metas.count) metas")
             writeSessionsCache()
             syncWatchers()
         } catch {
