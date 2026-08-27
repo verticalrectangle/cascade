@@ -157,7 +157,6 @@ final class CascadeClient: ObservableObject {
     private var guestSocket: CollabGuestSocket?
     private var guestMapper = CollabFrameMapper()
     /// Guest is a prompt/abort/answer write channel; transcript stays on the cloud stream.
-    private var guestPromptOnly = false
     private var guestWriteToken = false
     private let pagedSnapshot: Bool
     private var socketTask: URLSessionWebSocketTask?
@@ -174,6 +173,20 @@ final class CascadeClient: ObservableObject {
     private var activeTools: [(id: String, tool: [String: Any])] = []
     private var pendingRequest: CascadeUiRequest?
     private var pendingSends: Set<String> = []   // optimistic prompts awaiting echo
+    private var pendingSentAt: [String: Date] = [:]
+
+    // MARK: message identity — snapshot, reconnect replay, room and cloud
+    // frames must all collapse to ONE render. Port of the GTK fingerprint
+    // dedupe: without it every resync appends another copy of the tail and
+    // every dual-channel frame renders twice.
+    private var seenFingerprints: Set<String> = []
+    private var fingerprintOrder: [String] = []        // rolling eviction, cap 64
+    private var streamOpen = false                     // framing: deltas render only between start/end
+    private var roomLive = false                       // guest welcomed → cloud deltas filtered out
+    private var roomDiedAt: Date?                      // guest died → watchdog catches up the cloud gap
+    private var lastEventAt = Date()
+    private var lastResyncAt = Date.distantPast
+    private var watchdogTask: Task<Void, Never>?
     @Published private(set) var welcomed = false
     @Published private(set) var goal: GoalInfo?
     @Published private(set) var activity: String?
@@ -512,7 +525,6 @@ final class CascadeClient: ObservableObject {
     convenience init?(terminalLink: String, name: String) {
         guard case .success(let parsed) = CollabLinkParser.parse(terminalLink) else { return nil }
         self.init(config: Config(base: parsed.wsURL, token: "", sessionId: parsed.roomId, name: name))
-        guestPromptOnly = false
         guestWriteToken = parsed.writeToken != nil
         readOnly = parsed.writeToken == nil
         joinLink = terminalLink
@@ -526,19 +538,33 @@ final class CascadeClient: ObservableObject {
     /// until the room welcomes a writable guest.
     func attachPromptChannel(_ raw: String) {
         guard case .success(let parsed) = CollabLinkParser.parse(raw) else { return }
-        guestPromptOnly = true
         guestWriteToken = parsed.writeToken != nil
         joinLink = raw
         readOnly = true
         wireGuestSocket(CollabGuestSocket(link: parsed, name: deviceName))
+        guestSocket?.connect()
+    }
+
+    /// Late adoption: the session row often resolves AFTER connect() fires
+    /// (launch-attach races the list load). Fill the real title and wire the
+    /// room guest if the row carries a handle the initial attach never saw.
+    func adoptRow(_ row: JoinedSession) {
+        guard !terminated, sessionId == row.id else { return }
+        if (title == "new session" || title == sessionId), !row.title.isEmpty {
+            title = row.title
+        }
+        if guestSocket == nil, let handle = row.joinHandle ?? row.viewHandle, !handle.isEmpty {
+            attachPromptChannel(handle)
+            rebuild()
+        }
     }
 
     private func wireGuestSocket(_ socket: CollabGuestSocket) {
         guestSocket = socket
         socket.onOpen = { [weak self] in
             Task { @MainActor in
-                guard let self, !self.guestPromptOnly else { return }
-                self.phase = self.welcomed ? "reconnecting" : "waiting"
+                guard let self else { return }
+                if self.phase == "live" { self.phase = "reconnecting" }
                 self.rebuild()
             }
         }
@@ -547,35 +573,38 @@ final class CascadeClient: ObservableObject {
         }
         socket.onControl = { [weak self] ctrl in
             Task { @MainActor in
-                guard let self else { return }
-                if ctrl["t"] as? String == "room-closed" {
-                    if self.guestPromptOnly {
-                        self.readOnly = true
-                        self.rebuild()
-                    } else {
-                        self.end("room closed")
-                    }
-                }
+                guard let self, (ctrl["t"] as? String) == "room-closed" else { return }
+                self.roomClosed()
             }
         }
-        socket.onUnexpectedClose = { [weak self] reason, fatal in
+        socket.onUnexpectedClose = { [weak self] _, fatal in
             Task { @MainActor in
                 guard let self else { return }
-                if self.guestPromptOnly {
-                    if fatal {
-                        self.readOnly = true
-                        self.rebuild()
-                    }
-                    return
-                }
-                if fatal {
-                    self.end(reason)
-                } else {
-                    self.phase = "reconnecting"
-                    self.rebuild()
-                }
+                // The room is the primary live channel; its death un-filters
+                // the cloud stream immediately (dedupe keeps the overlap
+                // single-rendered). The watchdog pulls a catch-up snapshot
+                // if the guest doesn't come back.
+                self.roomLive = false
+                self.roomDiedAt = Date()
+                if fatal { self.readOnly = true }
+                if self.phase == "live" && !fatal { self.phase = "reconnecting" }
+                self.rebuild()
             }
         }
+    }
+
+    /// Room gone. Cloud-only fallback keeps the session usable; with no
+    /// cloud stream there is nothing left to hold on to.
+    private func roomClosed() {
+        roomLive = false
+        roomDiedAt = nil
+        readOnly = true
+        if hasCloudStream {
+            resync()
+        } else {
+            end("room closed")
+        }
+        rebuild()
     }
 
     private var hasCloudStream: Bool { !token.isEmpty }
@@ -591,10 +620,44 @@ final class CascadeClient: ObservableObject {
                 rebuild()
             }
         }
+        startWatchdog()
+    }
+
+    /// Health loop. Sockets die silently on iOS (backgrounding, network
+    /// handoffs): no error surfaces, the receive loop just never fires.
+    /// Symptoms rather than promises: a streaming agent that goes quiet, or
+    /// a prompt with no echo, both mean the channel is a corpse — pull a
+    /// fresh snapshot. A dead room guest gets the same catch-up if it
+    /// doesn't reconnect on its own.
+    private func startWatchdog() {
+        watchdogTask?.cancel()
+        watchdogTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(nanoseconds: 4_000_000_000)
+                await MainActor.run { [weak self] in
+                    guard let self, !self.terminated, self.phase != "ended" else { return }
+                    let now = Date()
+                    if let died = self.roomDiedAt, now.timeIntervalSince(died) > 8 {
+                        self.roomDiedAt = nil
+                        self.resync(force: true)
+                        return
+                    }
+                    if self.working, now.timeIntervalSince(self.lastEventAt) > 12 {
+                        self.resync(force: true)
+                        return
+                    }
+                    if let oldest = self.pendingSentAt.values.min(),
+                       now.timeIntervalSince(oldest) > 6 {
+                        self.resync(force: true)
+                    }
+                }
+            }
+        }
     }
 
     func close() {
         terminated = true
+        watchdogTask?.cancel()
         reconnectTask?.cancel()
         receiveLoop = false
         guestSocket?.close()
@@ -605,20 +668,17 @@ final class CascadeClient: ObservableObject {
     }
 
     private func backoff(for attempt: Int) -> TimeInterval {
-        TimeInterval([1, 2, 4, 8, 16][min(attempt, 4)])
+        TimeInterval([1, 2, 4, 8, 16, 30][min(attempt, 5)])
     }
 
     private func scheduleReconnect(reason: String) {
         guard !terminated, phase != "ended" else { return }
         reconnectTask?.cancel()
-        guard reconnectAttempt < 5 else {
-            phase = "ended"; endedReason = "reconnect failed · \(reason)"; working = false
-            rebuild()
-            return
-        }
+        // Never give up: a phone outlives WiFi→cellular handoffs, sleep-wake
+        // cycles, and dead NATs. Backoff caps at 30s and retries forever.
         let delay = backoff(for: reconnectAttempt)
         reconnectAttempt += 1
-        phase = "reconnecting"
+        if phase == "live" { phase = "reconnecting" }
         rebuild()
         reconnectTask = Task { [weak self] in
             try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
@@ -702,6 +762,7 @@ final class CascadeClient: ObservableObject {
             send(Wire.prompt(clean))
         }
         pendingSends.insert(clean)
+        pendingSentAt[clean] = Date()
         rebuild()
     }
 
@@ -759,8 +820,10 @@ final class CascadeClient: ObservableObject {
     /// action, and the foreground resync: a suspended app's sockets die
     /// silently (phase stays "live", the receive loop never fires again),
     /// so returning to the foreground must force a reopen.
-    func resync() {
+    func resync(force: Bool = false) {
         guard !terminated else { return }
+        if !force && Date().timeIntervalSince(lastResyncAt) < 10 { return }
+        lastResyncAt = Date()
         reconnectTask?.cancel()
         reconnectAttempt = 0
         guestSocket?.reconnectNow()
@@ -788,23 +851,34 @@ final class CascadeClient: ObservableObject {
         if let lvl = st["thinkingLevel"] as? String { thinkingLevel = lvl }
     }
 
+    /// Cloud frames while the room is alive: the room already renders turns,
+    /// live deltas, and tool events. Snapshots stay (idempotent replace) as
+    /// the catch-up source; chrome frames stay. Everything else drops or it
+    /// double-renders — there is exactly one live channel at a time.
+    private func cloudFrameAllowedWhileRoomLive(_ kind: String) -> Bool {
+        ["snapshot", "session_info", "state_changed", "notice",
+         "process_exited", "ui_request", "ui_request_cancelled"].contains(kind)
+    }
+
     private func applyFrameJSON(_ s: String) {
         guard let d = s.data(using: .utf8), let f = Wire.event(from: d), let kind = f["kind"] as? String else { return }
+        if roomLive && !cloudFrameAllowedWhileRoomLive(kind) { return }
         applyFrame(kind, f)
     }
 
     /// Collab host frame → existing SessionEvent projection.
     fileprivate func applyGuestFrame(_ frame: [String: Any]) {
-        if guestPromptOnly {
-            applyPromptChannelFrame(frame)
-            return
-        }
         let t = frame["t"] as? String ?? ""
         if t == "welcome" {
             guestMapper.reset()
             welcomed = true
+            roomLive = true          // room is now the authoritative live channel
+            roomDiedAt = nil
             reconnectAttempt = 0
             endedReason = nil
+            if let ro = frame["readOnly"] as? Bool {
+                readOnly = ro || !guestWriteToken
+            }
             if let header = frame["header"] as? [String: Any] {
                 if let n = header["title"] as? String, !n.isEmpty { title = n }
                 if let id = header["id"] as? String, !id.isEmpty { sessionId = id }
@@ -833,20 +907,9 @@ final class CascadeClient: ObservableObject {
         }
     }
 
-    /// Prompt-channel guest: update composer writability only. Do not ingest
+    /// Legacy prompt-channel handler removed: the room guest renders ALL
+    /// frames now. Do not ingest
     /// transcript events — those ride the cloud attach.
-    private func applyPromptChannelFrame(_ frame: [String: Any]) {
-        let t = frame["t"] as? String ?? ""
-        if t == "welcome" {
-            if let ro = frame["readOnly"] as? Bool {
-                readOnly = ro || !guestWriteToken
-            } else {
-                readOnly = !guestWriteToken
-            }
-            rebuild()
-        }
-    }
-
     private func absorbCollabState(_ st: [String: Any]) {
         working = st["isStreaming"] as? Bool ?? working
         if st["isAborting"] as? Bool == true { activity = "ABORTING…" }
@@ -868,22 +931,36 @@ final class CascadeClient: ObservableObject {
     }
 
     private func applyFrame(_ kind: String, _ f: [String: Any]) {
+        lastEventAt = Date()
         switch kind {
         case "snapshot":
-            if let msgs = f["messages"] as? [[String: Any]] { messages = msgs }
+            if let msgs = f["messages"] as? [[String: Any]] {
+                messages = msgs
+                // Snapshot replaces the transcript wholesale; seed identity
+                // from it so the replayed deltas that follow don't append
+                // duplicates, and so any prompt the user sent clears.
+                seenFingerprints.removeAll()
+                fingerprintOrder.removeAll()
+                for m in msgs { if let fp = Self.fingerprint(m) { markSeen(fp) } }
+                reconcilePendingSends(with: msgs)
+            }
             if let phases = f["todos"] as? [[String: Any]] { plan = Self.parsePlan(phases) }
             working = f["streaming"] as? Bool ?? false
+            streamOpen = working
             welcomed = true
             phase = "live"
-            if guestSocket == nil { refreshState() }   // cloud only — guest has no get_state RPC
+            if !roomLive { refreshState() }   // room has no get_state RPC
         case "message_start":
-            break   // role-only; content arrives via deltas or MessageEnd
+            streamOpen = true   // framing open: deltas may render
         case "text_delta":
+            // Replayed deltas for an already-finalized turn must not append.
+            guard streamOpen || working else { return }
             streamDone = false
             streamText += f["delta"] as? String ?? ""
             scheduleStreamRebuild()
             return   // delta frames are coalesced; skip the immediate rebuild below
         case "thinking_delta":
+            guard streamOpen || working else { return }
             streamDone = false
             streamThinking += f["delta"] as? String ?? ""
             scheduleStreamRebuild()
@@ -901,7 +978,15 @@ final class CascadeClient: ObservableObject {
             rebuild()
             return
         case "message_end":
-            if let m = f["message"] as? [String: Any] { messages.append(m); absorbMessage(m) }
+            streamOpen = false
+            if let m = f["message"] as? [String: Any] {
+                if !alreadySeen(m) {          // reconnects replay ends; keep one copy
+                    messages.append(m)
+                    if let fp = Self.fingerprint(m) { markSeen(fp) }
+                    absorbMessage(m)
+                }
+                reconcilePendingSends(with: [m])
+            }
             streamText = ""; streamThinking = ""; streamDone = true
         case "tool_start":
             if let id = f["tool_call_id"] as? String {
@@ -933,8 +1018,11 @@ final class CascadeClient: ObservableObject {
                     "content": (result as? [AnyHashable: Any])?["content"] ?? result ?? NSNull(),
                     "details": (result as? [AnyHashable: Any])?["details"] ?? NSNull(),
                 ]
-                messages.append(msg)
-                absorbToolResult(msg)
+                if !alreadySeen(msg) {          // tool ends replay on both channels
+                    messages.append(msg)
+                    if let fp = Self.fingerprint(msg) { markSeen(fp) }
+                    absorbToolResult(msg)
+                }
                 activeTools.removeAll { $0.id == id }
             }
         case "agent_start":
@@ -942,12 +1030,15 @@ final class CascadeClient: ObservableObject {
                 working = true
                 streamText = ""; streamThinking = ""; streamDone = false
             }
+            streamOpen = true
             activity = nil
         case "agent_end":
             working = false
+            streamOpen = false
             streamText = ""; streamThinking = ""
             activity = nil
-            pendingSends.removeAll()
+            // pendingSends clear on user-message echo (fingerprint match), not
+            // here — a foreign agent_end must not swallow an unacked prompt.
         case "todo_changed":
             if let phases = f["phases"] as? [[String: Any]] { plan = Self.parsePlan(phases) }
         case "ui_request":
@@ -994,6 +1085,7 @@ final class CascadeClient: ObservableObject {
     private func end(_ reason: String) {
         if phase == "ended" { return }
         terminated = true
+        watchdogTask?.cancel()
         reconnectTask?.cancel()
         phase = "ended"
         endedReason = reason
@@ -1006,6 +1098,50 @@ final class CascadeClient: ObservableObject {
     }
 
     // MARK: projection — cascade transcript → [UITurn]
+
+    // MARK: fingerprint identity (port of GTK seen_fingerprints)
+
+    private static func fingerprint(_ m: [String: Any]) -> String? {
+        let role = m["role"] as? String ?? ""
+        if role == "toolResult", let id = m["toolCallId"] as? String, !id.isEmpty {
+            return "tr:\(id)"
+        }
+        let text: String
+        if let str = m["content"] as? String {
+            text = str
+        } else if let arr = m["content"] as? [Any] {
+            text = arr.compactMap { ($0 as? [String: Any])?["text"] as? String }.joined()
+        } else {
+            return nil
+        }
+        guard !text.isEmpty else { return nil }
+        return "\(role):\(text)"
+    }
+
+    private func markSeen(_ fp: String) {
+        guard seenFingerprints.insert(fp).inserted else { return }
+        fingerprintOrder.append(fp)
+        if fingerprintOrder.count > 64 {
+            seenFingerprints.remove(fingerprintOrder.removeFirst())
+        }
+    }
+
+    private func alreadySeen(_ m: [String: Any]) -> Bool {
+        guard let fp = Self.fingerprint(m) else { return false }
+        return seenFingerprints.contains(fp)
+    }
+
+    /// Your own prompt turns from grey to confirmed the moment any channel
+    /// echoes it as a user message — not on the next agent_end.
+    private func reconcilePendingSends(with msgs: [[String: Any]]) {
+        guard !pendingSends.isEmpty else { return }
+        let echoed = Set(msgs.filter { ($0["role"] as? String) == "user" }
+            .compactMap { Self.fingerprint($0) })
+        for p in pendingSends where echoed.contains("user:\(p)") {
+            pendingSends.remove(p)
+            pendingSentAt[p] = nil
+        }
+    }
 
     /// Adopt per-message state from a finalized assistant/user message.
     private func absorbMessage(_ m: [String: Any]) {

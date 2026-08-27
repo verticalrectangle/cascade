@@ -183,6 +183,9 @@ final class AppModel: ObservableObject {
         Task {
             await refreshSessions()
             await refreshShare(for: sessionId)
+            if let row = sessions.first(where: { $0.id == sessionId }) {
+                client.adoptRow(row)
+            }
         }
         return true
     }
@@ -392,7 +395,11 @@ final class AppModel: ObservableObject {
                       self.active === client,
                       !client.welcomed,
                       client.phase != "ended" else { return }
-                self.leave()
+                // A slow first attach used to evict the session outright —
+                // the user watched an empty transcript with a working
+                // composer. Retry instead; the user can still Leave.
+                client.resync(force: true)
+                self.scheduleActiveWelcomeTimeout(client)
             }
         }
     }
@@ -539,6 +546,7 @@ struct RootView: View {
             guard !didAutoAttach, app.active == nil, app.account != nil else { return }
             didAutoAttach = true
             if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
+                if app.sessions.isEmpty { await app.refreshSessions() }
                 _ = app.connect(sessionId: id)
             } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
                 _ = app.connect(sessionId: latest.id)
