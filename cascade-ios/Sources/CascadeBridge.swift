@@ -87,6 +87,11 @@ enum Wire {
         body(["kind": "set_thinking", "level": level])
     }
     static func getState() -> String { body(["kind": "get_state"]) }
+    static func getSnapshot(limit: UInt32 = 100, before: UInt64?) -> String {
+        var o: [String: Any] = ["kind": "get_snapshot", "limit": Int(limit)]
+        if let before { o["before"] = Int(before) }
+        return body(o)
+    }
     static func answer(requestId: String, value: String? = nil, confirmed: Bool? = nil) -> String {
         var response: [String: Any] = [:]
         if let value { response["value"] = value }
@@ -114,7 +119,7 @@ enum Wire {
 final class CascadeClient: ObservableObject {
     // Published surface the UI observes.
     @Published private(set) var turns: [UITurn] = []
-    @Published private(set) var phase: String = "connecting"   // connecting/waiting/live/ended
+    @Published private(set) var phase: String = "waiting"      // waiting/live/reconnecting/ended
     @Published private(set) var working = false
     @Published private(set) var title = "session"
     @Published private(set) var cwd = "~"
@@ -198,6 +203,10 @@ final class CascadeClient: ObservableObject {
     private var cachedStaticTurns: [UITurn] = []
     private var cachedTailCount = 0
     private var cachedMessageCount = 0
+    private var historyOldestIndex: UInt64 = 0
+    private var historyTotal: UInt64 = 0
+    @Published private(set) var historyHasMore = false
+    private var historyLoading = false
     private var streamRebuildPending = false
     private var lastStreamRebuild: Date = .distantPast
     private let streamCoalesceInterval: TimeInterval = 1.0 / 30.0
@@ -210,11 +219,13 @@ final class CascadeClient: ObservableObject {
         let readOnly: Bool
         let paged: Bool
         let title: String
+        let cwd: String
         /// Pre-set when attaching to an existing session (skips login+list).
-        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true, title: String = "") {
+        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true, title: String = "", cwd: String = "") {
             self.base = base; self.token = token; self.sessionId = sessionId; self.name = name; self.title = title
             self.readOnly = readOnly
             self.paged = paged
+            self.cwd = cwd
         }
     }
 
@@ -517,8 +528,9 @@ final class CascadeClient: ObservableObject {
         // the prompt-only guest channel carry no title, so without this the
         // editor header stays on the "new session" placeholder forever.
         title = config.title.isEmpty ? "new session" : config.title
-        cwd = "…"
+        cwd = config.cwd.isEmpty ? "…" : config.cwd
         readOnly = config.readOnly
+        phase = "waiting"
     }
 
     /// Attach to a `kind: terminal` session via an omp collab join/view handle.
@@ -550,9 +562,9 @@ final class CascadeClient: ObservableObject {
     /// room guest if the row carries a handle the initial attach never saw.
     func adoptRow(_ row: JoinedSession) {
         guard !terminated, sessionId == row.id else { return }
-        if (title == "new session" || title == sessionId), !row.title.isEmpty {
-            title = row.title
-        }
+        if !row.title.isEmpty { title = row.title }
+        if !row.cwd.isEmpty { cwd = row.cwd }
+        if !row.relay.isEmpty { relay = row.relay }
         if guestSocket == nil, let handle = row.joinHandle ?? row.viewHandle, !handle.isEmpty {
             attachPromptChannel(handle)
             rebuild()
@@ -839,6 +851,13 @@ final class CascadeClient: ObservableObject {
         send(Wire.getState())
     }
 
+    /// Next older transcript page (`GetSnapshot` before `oldest_index`).
+    func loadHistoryPage() {
+        guard !terminated, !historyLoading, historyHasMore, hasCloudStream else { return }
+        historyLoading = true
+        send(Wire.getSnapshot(limit: 100, before: historyOldestIndex))
+    }
+
     /// Adopt RpcSessionState JSON: model {provider,id,name…}, thinkingLevel.
     private func absorbState(_ st: [String: Any]?) {
         guard let st else { return }
@@ -938,13 +957,38 @@ final class CascadeClient: ObservableObject {
         switch kind {
         case "snapshot":
             if let msgs = f["messages"] as? [[String: Any]] {
-                messages = msgs
-                // Snapshot replaces the transcript wholesale; seed identity
-                // from it so the replayed deltas that follow don't append
-                // duplicates, and so any prompt the user sent clears.
-                seenFingerprints.removeAll()
-                fingerprintOrder.removeAll()
-                for m in msgs { if let fp = Self.fingerprint(m) { markSeen(fp) } }
+                let oldest = Self.jsonUInt64(f["oldest_index"]) ?? 0
+                let hasMore = f["has_more"] as? Bool ?? false
+                let total = Self.jsonUInt64(f["total_messages"]) ?? 0
+                // Older page (GetSnapshot while scrolling up) prepends; a
+                // tail snapshot still replaces so reconnects don't stack.
+                if historyLoading, oldest < historyOldestIndex, !msgs.isEmpty, msgs.count <= 150 {
+                    let existing = Set(messages.compactMap { $0["id"] as? String })
+                    let fresh = msgs.filter { m in
+                        guard let id = m["id"] as? String, !id.isEmpty else { return true }
+                        return !existing.contains(id)
+                    }
+                    messages = fresh + messages
+                    for m in fresh { remember(m) }
+                    historyOldestIndex = oldest
+                    historyHasMore = hasMore
+                    if total > 0 { historyTotal = total }
+                    historyLoading = false
+                    cachedStaticTurns = []
+                    cachedMessageCount = 0
+                } else {
+                    messages = msgs
+                    // Snapshot replaces the transcript wholesale; seed identity
+                    // from it so the replayed deltas that follow don't append
+                    // duplicates, and so any prompt the user sent clears.
+                    seenFingerprints.removeAll()
+                    fingerprintOrder.removeAll()
+                    for m in msgs { remember(m) }
+                    historyOldestIndex = oldest
+                    historyHasMore = hasMore
+                    historyTotal = total
+                    historyLoading = false
+                }
                 reconcilePendingSends(with: msgs)
             }
             if let phases = f["todos"] as? [[String: Any]] { plan = Self.parsePlan(phases) }
@@ -985,7 +1029,7 @@ final class CascadeClient: ObservableObject {
             if let m = f["message"] as? [String: Any] {
                 if !alreadySeen(m) {          // reconnects replay ends; keep one copy
                     messages.append(m)
-                    if let fp = Self.fingerprint(m) { markSeen(fp) }
+                    remember(m)
                     absorbMessage(m)
                 }
                 reconcilePendingSends(with: [m])
@@ -1023,7 +1067,7 @@ final class CascadeClient: ObservableObject {
                 ]
                 if !alreadySeen(msg) {          // tool ends replay on both channels
                     messages.append(msg)
-                    if let fp = Self.fingerprint(msg) { markSeen(fp) }
+                    remember(msg)
                     absorbToolResult(msg)
                 }
                 activeTools.removeAll { $0.id == id }
@@ -1104,21 +1148,143 @@ final class CascadeClient: ObservableObject {
 
     // MARK: fingerprint identity (port of GTK seen_fingerprints)
 
-    private static func fingerprint(_ m: [String: Any]) -> String? {
-        let role = m["role"] as? String ?? ""
-        if role == "toolResult", let id = m["toolCallId"] as? String, !id.isEmpty {
+    /// Hash of role + toolCallId + each content-part type/text/thinking
+    /// (GTK `message_fingerprint` / `fingerprint_part` / `thinking_text`).
+    /// Tool results stay `tr:<id>` so live tool_end frames match snapshot rows.
+    /// Never empty: thinking-only and toolCall-only assistants still seed.
+    private static func fingerprint(_ m: [String: Any]) -> String {
+        let role = m["role"] as? String ?? "assistant"
+        let toolCallId = strField(m, "toolCallId") ?? strField(m, "tool_call_id")
+        if role == "toolResult", let id = toolCallId, !id.isEmpty {
             return "tr:\(id)"
         }
-        let text: String
-        if let str = m["content"] as? String {
-            text = str
-        } else if let arr = m["content"] as? [Any] {
-            text = arr.compactMap { ($0 as? [String: Any])?["text"] as? String }.joined()
-        } else {
-            return nil
+        var payload = role
+        payload += "\u{1e}"
+        payload += toolCallId ?? ""
+        payload += "\u{1e}"
+        if let arr = m["content"] as? [Any] {
+            for part in arr {
+                payload += fingerprintPart(part)
+                payload += "\u{1e}"
+            }
+        } else if let s = m["content"] as? String {
+            payload += s
+        } else if let obj = m["content"] as? [String: Any], let t = obj["text"] as? String {
+            payload += t
+        } else if let t = m["text"] as? String {
+            payload += t
         }
-        guard !text.isEmpty else { return nil }
-        return "\(role):\(text)"
+        return sha256Hex(payload)
+    }
+
+    private static func fingerprintPart(_ part: Any) -> String {
+        if let s = part as? String { return ":\(s)" }
+        guard let p = part as? [String: Any] else { return "" }
+        let ty = p["type"] as? String ?? ""
+        var out = ty
+        if let text = p["text"] as? String {
+            out += "\u{1f}"
+            out += text
+        }
+        if ty == "toolCall" || ty == "tool_call" {
+            if let id = strField(p, "id") ?? strField(p, "toolCallId") {
+                out += "\u{1f}"
+                out += id
+            }
+        }
+        if let think = thinkingText(p) {
+            out += "\u{1f}"
+            out += think
+        }
+        return out
+    }
+
+    private static func thinkingText(_ part: [String: Any]) -> String? {
+        let ty = part["type"] as? String ?? ""
+        guard ty == "thinking" || ty == "redactedThinking" || ty == "reasoning" else { return nil }
+        for key in ["thinking", "text", "data", "reasoning"] {
+            if let s = part[key] as? String, !s.isEmpty { return s }
+        }
+        let nested = flattenContentValue(part["content"])
+        return nested.isEmpty ? nil : nested
+    }
+
+    private static func flattenContentValue(_ content: Any?) -> String {
+        if let s = content as? String { return s }
+        if let arr = content as? [Any] {
+            return arr.compactMap { partPlainText($0) }.joined()
+        }
+        if let obj = content as? [String: Any], let t = obj["text"] as? String { return t }
+        return ""
+    }
+
+    private static func partPlainText(_ part: Any) -> String? {
+        if let s = part as? String { return s }
+        if let d = part as? [String: Any], let t = d["text"] as? String { return t }
+        return nil
+    }
+
+    private static func messagePlainText(_ m: [String: Any]) -> String {
+        let flat = flattenContentValue(m["content"])
+        if !flat.isEmpty { return flat }
+        return m["text"] as? String ?? ""
+    }
+
+    private static func contentParts(_ content: Any?) -> [[String: Any]] {
+        if let arr = content as? [[String: Any]] { return arr }
+        if let arr = content as? [Any] { return arr.compactMap { $0 as? [String: Any] } }
+        return []
+    }
+
+    private static func strField(_ m: [String: Any], _ key: String) -> String? {
+        if let s = m[key] as? String, !s.isEmpty { return s }
+        return nil
+    }
+
+    private static func sha256Hex(_ s: String) -> String {
+        SHA256.hash(data: Data(s.utf8)).map { String(format: "%02x", $0) }.joined()
+    }
+
+    private static func jsonUInt64(_ v: Any?) -> UInt64? {
+        if let n = v as? UInt64 { return n }
+        if let n = v as? Int, n >= 0 { return UInt64(n) }
+        if let n = v as? Int64, n >= 0 { return UInt64(n) }
+        if let n = v as? Double, n >= 0, n < Double(UInt64.max) { return UInt64(n) }
+        if let n = v as? NSNumber { return n.uint64Value }
+        return nil
+    }
+
+    private static func identityKeys(_ m: [String: Any]) -> [String] {
+        var keys = [fingerprint(m)]
+        if let id = m["id"] as? String, !id.isEmpty { keys.append("id:\(id)") }
+        return keys
+    }
+
+    /// `call_xxx|fc_xxx` and either half all address the same tool chip.
+    private static func toolIdAliases(_ id: String) -> [String] {
+        let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var out = [trimmed]
+        if trimmed.contains("|") {
+            for part in trimmed.split(separator: "|", omittingEmptySubsequences: true) {
+                let s = String(part).trimmingCharacters(in: .whitespacesAndNewlines)
+                if !s.isEmpty, !out.contains(s) { out.append(s) }
+            }
+        }
+        return out
+    }
+
+    private func indexTool(_ id: String, at idx: Int, into map: inout [String: Int]) {
+        for key in Self.toolIdAliases(id) where map[key] == nil {
+            map[key] = idx
+        }
+    }
+
+    private func lookupTool(_ id: String, in map: [String: Int]) -> Int? {
+        for key in Self.toolIdAliases(id) {
+            if let idx = map[key] { return idx }
+        }
+        return nil
     }
 
     private func markSeen(_ fp: String) {
@@ -1129,9 +1295,29 @@ final class CascadeClient: ObservableObject {
         }
     }
 
+    private func remember(_ m: [String: Any]) {
+        markSeen(Self.fingerprint(m))
+        if let id = m["id"] as? String, !id.isEmpty {
+            markSeen("id:\(id)")
+        }
+    }
+
     private func alreadySeen(_ m: [String: Any]) -> Bool {
-        guard let fp = Self.fingerprint(m) else { return false }
-        return seenFingerprints.contains(fp)
+        if let id = m["id"] as? String, !id.isEmpty, seenFingerprints.contains("id:\(id)") {
+            return true
+        }
+        return seenFingerprints.contains(Self.fingerprint(m))
+    }
+
+    /// GTK `message_already_rendered` for the projection pass: first copy
+    /// of a fingerprint (or message.id) renders; later copies in the same
+    /// array are skipped. Local set — not the rolling 64 window — so a
+    /// 100-message tail still unique-collapses without hiding earlier rows.
+    private func messageAlreadyRendered(_ rendered: inout Set<String>, _ m: [String: Any]) -> Bool {
+        let keys = Self.identityKeys(m)
+        if keys.contains(where: { rendered.contains($0) }) { return true }
+        for k in keys { rendered.insert(k) }
+        return false
     }
 
     /// Your own prompt turns from grey to confirmed the moment any channel
@@ -1139,8 +1325,8 @@ final class CascadeClient: ObservableObject {
     private func reconcilePendingSends(with msgs: [[String: Any]]) {
         guard !pendingSends.isEmpty else { return }
         let echoed = Set(msgs.filter { ($0["role"] as? String) == "user" }
-            .compactMap { Self.fingerprint($0) })
-        for p in pendingSends where echoed.contains("user:\(p)") {
+            .map { Self.messagePlainText($0) })
+        for p in pendingSends where echoed.contains(p) {
             pendingSends.remove(p)
             pendingSentAt[p] = nil
         }
@@ -1170,8 +1356,6 @@ final class CascadeClient: ObservableObject {
             staticTurns = cachedStaticTurns
         } else {
             staticTurns = buildStaticTurns()
-            cachedStaticTurns = staticTurns
-            cachedMessageCount = messages.count
         }
 
         let tail = buildTail(staticTurns: staticTurns)
@@ -1182,7 +1366,8 @@ final class CascadeClient: ObservableObject {
             for i in combined.indices { combined[i].model = "" }
         }
 
-        cachedStaticTurns = Array(combined.prefix(staticTurns.count))
+        cachedStaticTurns = staticTurns
+        cachedMessageCount = messages.count
         cachedTailCount = tail.count
         if turns != combined { turns = combined }
 
@@ -1197,10 +1382,12 @@ final class CascadeClient: ObservableObject {
     private func buildStaticTurns() -> [UITurn] {
         var out: [UITurn] = []
         var toolIndex: [String: Int] = [:]
+        var rendered = Set<String>()
 
         if welcomed && justPaired { out.append(UITurn.sys("paired", "SESSION STARTED")) }
 
         for entry in messages {
+            if messageAlreadyRendered(&rendered, entry) { continue }
             let eid = messageId(entry)
             let role = entry["role"] as? String ?? ""
             switch role {
@@ -1208,21 +1395,28 @@ final class CascadeClient: ObservableObject {
                 out.append(userTurn(id: eid, content: entry["content"]))
             case "assistant":
                 let msgModel = entry["model"] as? String ?? ""
-                for (i, block) in (entry["content"] as? [[String: Any]] ?? []).enumerated() {
+                let parts = Self.contentParts(entry["content"])
+                if parts.isEmpty, let s = entry["content"] as? String, !s.isEmpty {
+                    out.append(agentTurn(id: eid, text: s, model: msgModel))
+                }
+                for (i, block) in parts.enumerated() {
+                    // thinking/redactedThinking/reasoning never become agentTurn.
+                    if isThinkingBlock(block) {
+                        if let think = Self.thinkingText(block) {
+                            out.append(thinkingTurn(id: "\(eid)#\(i)", text: think, seconds: nil, model: msgModel))
+                        }
+                        continue
+                    }
                     switch block["type"] as? String {
                     case "text":
                         let text = block["text"] as? String ?? ""
                         if !text.isEmpty { out.append(agentTurn(id: "\(eid)#\(i)", text: text, model: msgModel)) }
-                    case "toolCall":
-                        let name = block["name"] as? String ?? "tool"
-                        if name == "todo" { break }
-                        let id = block["id"] as? String ?? "\(eid)#\(i)"
-                        out.append(toolTurn(id: id, name: name, args: block["arguments"], intent: block["intent"] as? String))
-                        toolIndex[id] = out.count - 1
-                    case "thinking", "redactedThinking", "reasoning":
-                        if let think = thinkingContent(from: block) {
-                            out.append(thinkingTurn(id: "\(eid)#\(i)", text: think, seconds: nil, model: msgModel))
-                        }
+                    case "toolCall", "tool_call":
+                        let name = block["name"] as? String ?? block["toolName"] as? String ?? "tool"
+                        if name == "todo" { continue }
+                        let id = block["id"] as? String ?? block["toolCallId"] as? String ?? "\(eid)#\(i)"
+                        out.append(toolTurn(id: id, name: name, args: block["arguments"] ?? block["args"], intent: block["intent"] as? String))
+                        indexTool(id, at: out.count - 1, into: &toolIndex)
                     default: break
                     }
                 }
@@ -1232,16 +1426,17 @@ final class CascadeClient: ObservableObject {
                     out.append(UITurn.sys("error", "TURN FAILED — SEE THE HOST"))
                 }
             case "toolResult":
-                let id = entry["toolCallId"] as? String ?? eid
+                let id = entry["toolCallId"] as? String ?? entry["tool_call_id"] as? String ?? eid
                 if (entry["toolName"] as? String) == "todo" { break }   // plan handled via todo_changed
                 let isError = entry["isError"] as? Bool ?? false
                 let details = entry["details"] as? [String: Any]
-                if let idx = toolIndex[id] {
+                if let idx = lookupTool(id, in: toolIndex) {
                     fillResult(&out[idx], content: entry["content"], isError: isError, details: details, kind: out[idx].kind)
                 } else {
                     var turn = toolTurn(id: id, name: entry["toolName"] as? String ?? "tool", args: nil, intent: nil)
                     fillResult(&turn, content: entry["content"], isError: isError, details: details, kind: turn.kind)
                     out.append(turn)
+                    indexTool(id, at: out.count - 1, into: &toolIndex)
                 }
             default:
                 // Unknown roles render as system notes rather than vanishing.
@@ -1257,7 +1452,7 @@ final class CascadeClient: ObservableObject {
         var out: [UITurn] = []
         var toolIndex: [String: Int] = [:]
         for (i, turn) in staticTurns.enumerated() where turn.type == .tool {
-            toolIndex[turn.id] = i
+            indexTool(turn.id, at: i, into: &toolIndex)
         }
 
         // Optimistic echo of your own prompt until the daemon streams the user message back.
@@ -1269,7 +1464,7 @@ final class CascadeClient: ObservableObject {
         }
 
         // Executing tools with no result yet.
-        for (id, tool) in activeTools where toolIndex[id] == nil {
+        for (id, tool) in activeTools where lookupTool(id, in: toolIndex) == nil {
             var turn = toolTurn(id: id, name: tool["toolName"] as? String ?? "tool", args: tool["args"], intent: tool["intent"] as? String)
             turn.pending = true
             out.append(turn)
@@ -1426,9 +1621,7 @@ final class CascadeClient: ObservableObject {
     }
 
     private func thinkingContent(from b: [String: Any]) -> String? {
-        guard isThinkingBlock(b) else { return nil }
-        let text = b["thinking"] as? String ?? b["text"] as? String ?? b["data"] as? String ?? b["content"] as? String ?? b["reasoning"] as? String
-        return text?.isEmpty == false ? text : nil
+        Self.thinkingText(b)
     }
 
     private func toolKind(_ name: String) -> String {

@@ -13,10 +13,37 @@ private struct BottomOffsetKey: PreferenceKey {
     }
 }
 
+private struct TopOffsetKey: PreferenceKey {
+    static var defaultValue: CGFloat = -.infinity
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
 private struct ScrollHeightKey: PreferenceKey {
     static var defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
+    }
+}
+
+/// Scroll distance from the transcript top that triggers a history page.
+private let HISTORY_TRIGGER: CGFloat = 150
+
+/// Viewport-space distance from the live end of the transcript to the fold,
+/// matching GTK `sentinel_gap` (`translate_coordinates` y − page size).
+private struct ScrollMetrics: Equatable {
+    var gap: CGFloat
+    var height: CGFloat
+    var nearTop: Bool
+}
+
+private struct TranscriptListRow: ViewModifier {
+    func body(content: Content) -> some View {
+        content
+            .listRowInsets(EdgeInsets())
+            .listRowSeparator(.hidden)
+            .listRowBackground(Color.clear)
     }
 }
 
@@ -40,8 +67,10 @@ struct EditorView: View {
     @State private var programmaticScroll = false
     @State private var suppressReengage = false
     @EnvironmentObject var app: AppModel
+    var onHistoryTrigger: () -> Void
 
-    init(client: CascadeClient) {
+    init(client: CascadeClient, onHistoryTrigger: @escaping () -> Void = {}) {
+        self.onHistoryTrigger = onHistoryTrigger
         let seed = Session(id: "live", repo: client.title, branch: client.readOnly ? "watch" : "control",
                            dir: client.cwd, model: client.modelName, status: .waiting,
                            lastSeen: "live", action: "CONNECTING…", tokens: "—", cost: "—")
@@ -233,11 +262,80 @@ struct EditorView: View {
         proxy.scrollTo("bottom", anchor: .bottom)
     }
 
+    /// GTK `sentinel_gap`: distance from the bottom sentinel to the fold.
+    private func applySentinelGap(_ gap: CGFloat) {
+        let atBottom = gap <= TranscriptCaps.followReengage
+        if programmaticScroll {
+            if atBottom { programmaticScroll = false }
+            return
+        }
+        if atBottom && !suppressReengage {
+            stickToBottom = true
+        } else if !atBottom {
+            stickToBottom = false
+            suppressReengage = false
+        }
+    }
+
+    @ViewBuilder private func transcriptItem(_ item: TranscriptItem) -> some View {
+        switch item {
+        case .turn(let turn):
+            TurnRow(turn: turn, t: t,
+                    onImage: { viewer = $0 },
+                    onAnswer: vm.readOnly ? nil : { vm.answer($0, $1) },
+                    onAnswerText: vm.readOnly ? nil : { vm.answer($0, $1) },
+                    onCancelAsk: vm.readOnly ? nil : { vm.skip($0) })
+                .id(turn.id)
+        case .strip(_, let turns):
+            ToolStripView(turns: turns, t: t, onImage: { viewer = $0 })
+                .id(item.id)
+        }
+    }
+
     private var transcript: some View {
         ScrollViewReader { proxy in
-            ScrollView(.vertical) {
-                transcriptList
+            List {
+                Color.clear
+                    .frame(height: 1)
+                    .modifier(TranscriptListRow())
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: TopOffsetKey.self,
+                                value: geo.frame(in: .named("scroll")).minY)
+                        }
+                    )
+                ForEach(groupedTranscript(vm.turns)) { item in
+                    transcriptItem(item)
+                        .modifier(TranscriptListRow())
+                }
+                if vm.isRunning {
+                    ThinkingLine(t: t)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .id("think")
+                        .modifier(TranscriptListRow())
+                }
+                Color.clear
+                    .frame(height: 8)
+                    .id("bottom")
+                    .modifier(TranscriptListRow())
+                    .background(
+                        GeometryReader { geo in
+                            Color.clear.preference(
+                                key: BottomOffsetKey.self,
+                                value: geo.frame(in: .named("scroll")).maxY)
+                        }
+                    )
             }
+            .listStyle(.plain)
+            .scrollContentBackground(.hidden)
+            .selectionDisabled()
+            .listRowSpacing(0)
+            .listSectionSpacing(.custom(0))
+            .listSectionMargins(.all, 0)
+            .environment(\.defaultMinListRowHeight, 1)
+            .contentMargins(.horizontal, 16, for: .scrollContent)
+            .contentMargins(.vertical, 16, for: .scrollContent)
             .coordinateSpace(name: "scroll")
             .background(
                 GeometryReader { geo in
@@ -247,16 +345,26 @@ struct EditorView: View {
             )
             .onPreferenceChange(ScrollHeightKey.self) { scrollVisibleHeight = $0 }
             .onPreferenceChange(BottomOffsetKey.self) { bottomY in
-                let atBottom = bottomY <= scrollVisibleHeight + TranscriptCaps.followReengage
-                if programmaticScroll {
-                    if atBottom { programmaticScroll = false }
-                    return
-                }
-                if atBottom && !suppressReengage {
-                    stickToBottom = true
-                } else if !atBottom {
-                    stickToBottom = false
-                    suppressReengage = false
+                // On-screen sentinel only: List recycles this row when scrolled
+                // away, so stale preferences must not drive follow.
+                guard bottomY.isFinite, scrollVisibleHeight > 0,
+                      bottomY > -1, bottomY < scrollVisibleHeight + 400 else { return }
+                applySentinelGap(bottomY - scrollVisibleHeight)
+            }
+            .onScrollGeometryChange(for: ScrollMetrics.self, of: { geo in
+                ScrollMetrics(
+                    gap: geo.contentSize.height - geo.visibleRect.maxY,
+                    height: geo.containerSize.height,
+                    nearTop: geo.contentOffset.y < HISTORY_TRIGGER
+                )
+            }) { _, metrics in
+                scrollVisibleHeight = metrics.height
+                applySentinelGap(metrics.gap)
+                // GTK HISTORY_TRIGGER: load an older page when the user
+                // scrolls within 150px of the top. Paging is a no-op until
+                // CascadeBridge exposes loadHistoryPage.
+                if !programmaticScroll, metrics.nearTop {
+                    onHistoryTrigger()
                 }
             }
             .onChange(of: vm.turns) { _, turns in
@@ -316,38 +424,6 @@ struct EditorView: View {
             .animation(.easeInOut(duration: 0.15), value: showJumpPill)
             .environment(\.unpinFollow, unpinFollow)
         }
-    }
-
-    @ViewBuilder private var transcriptList: some View {
-        // Plain VStack — the transcript is bounded (tail=100); LazyVStack
-        // cell recycling blanks text on real devices under memory pressure.
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(groupedTranscript(vm.turns)) { item in
-                switch item {
-                case .turn(let turn):
-                    TurnRow(turn: turn, t: t,
-                            onImage: { viewer = $0 },
-                            onAnswer: vm.readOnly ? nil : { vm.answer($0, $1) },
-                            onAnswerText: vm.readOnly ? nil : { vm.answer($0, $1) },
-                            onCancelAsk: vm.readOnly ? nil : { vm.skip($0) })
-                        .id(turn.id)
-                case .strip(_, let turns):
-                    ToolStripView(turns: turns, t: t, onImage: { viewer = $0 })
-                        .id(item.id)
-                }
-            }
-            if vm.isRunning { ThinkingLine(t: t).id("think") }
-            Color.clear.frame(height: 8)
-                .id("bottom")
-                .background(
-                    GeometryReader { geo in
-                        Color.clear
-                            .preference(key: BottomOffsetKey.self,
-                                        value: geo.frame(in: .named("scroll")).maxY)
-                    }
-                )
-        }
-        .padding(16)
     }
 
     private func hideKeyboard() {

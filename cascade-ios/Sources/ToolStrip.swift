@@ -10,6 +10,7 @@ enum TranscriptCaps {
     static let lines = 20
     static let followReengage: CGFloat = 40
     static let streamFade: Double = 0.18
+    static let historyTrigger: CGFloat = 150
 }
 
 private struct UnpinFollowKey: EnvironmentKey {
@@ -75,15 +76,14 @@ struct ToolStripView: View {
                             selected: openId == turn.id,
                             onTap: { toggle(turn) }
                         )
-                        .transition(.move(edge: .trailing).combined(with: .opacity))
                     }
                 }
                 .animation(.easeOut(duration: TranscriptCaps.streamFade), value: turns.map(\.id))
                 .padding(.vertical, 2)
             }
+            .fixedSize(horizontal: false, vertical: true)
             if let openId, let turn = turns.first(where: { $0.id == openId }) {
                 ToolExpansionCard(turn: turn, t: t, expanded: $bodyExpanded, onImage: onImage)
-                    .transition(.opacity)
             }
         }
         .padding(.bottom, 8)
@@ -253,6 +253,7 @@ private struct ToolExpansionCard: View {
                     .padding(.horizontal, 10)
                     .padding(.bottom, hidden == 0 ? 8 : 4)
             }
+            .fixedSize(horizontal: false, vertical: true)
             if let img = turn.image, turn.type == .tool {
                 Button { onImage(img) } label: {
                     HStack(spacing: 6) {

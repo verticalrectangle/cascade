@@ -224,6 +224,7 @@ struct JoinedSession: Identifiable, Codable, Equatable {
     var id: String              // stable per room link
     var link: String
     var title: String
+    var cwd: String = ""
     var relay: String
     var readOnly: Bool
     var savedAt: Date

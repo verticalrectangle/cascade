@@ -44,7 +44,43 @@ final class AppModel: ObservableObject {
            let muted = try? JSONDecoder().decode(Set<String>.self, from: data) {
             mutedSessions = muted
         }
-        if account != nil { Task { await refreshSessions() } }
+        // Warm cache: paint the rail from the last list instantly (GTK
+        // sessions-cache.json). Live refresh reconciles underneath.
+        if account != nil {
+            loadSessionsCache()
+            Task { await refreshSessions() }
+        }
+    }
+
+    /// EditorView fires this when the transcript is within HISTORY_TRIGGER
+    /// (150px) of the top. Paging (`?tail=100&before=oldest_index`) lives on
+    /// CascadeBridge; this is the UI trigger only.
+    func loadHistoryPage() {
+        guard active != nil else { return }
+    }
+
+    private static var sessionsCacheURL: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("cascade", isDirectory: true)
+            .appendingPathComponent("sessions-cache.json")
+    }
+
+    private func loadSessionsCache() {
+        let url = Self.sessionsCacheURL
+        guard let data = try? Data(contentsOf: url) else { return }
+        let dec = JSONDecoder()
+        dec.dateDecodingStrategy = .iso8601
+        guard let cached = try? dec.decode([JoinedSession].self, from: data) else { return }
+        sessions = cached
+    }
+
+    private func writeSessionsCache() {
+        let url = Self.sessionsCacheURL
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        let enc = JSONEncoder()
+        enc.dateEncodingStrategy = .iso8601
+        guard let data = try? enc.encode(sessions) else { return }
+        try? data.write(to: url, options: .atomic)
     }
 
     func muteSession(_ id: String) {
@@ -133,6 +169,7 @@ final class AppModel: ObservableObject {
                     id: m.id,
                     link: m.join_handle ?? m.view_handle ?? m.id,
                     title: m.name ?? (dirName.isEmpty ? "session" : dirName),
+                    cwd: m.cwd,
                     relay: machineNames[m.machine] ?? m.machine,
                     readOnly: readOnly,
                     savedAt: m.last_active ?? m.created_at ?? .distantPast,
@@ -153,6 +190,7 @@ final class AppModel: ObservableObject {
                     if l != r { return l }      // live first
                     return lhs.savedAt > rhs.savedAt
                 }
+            writeSessionsCache()
             syncWatchers()
         } catch {
             // Cancellation is a superseded refresh, not an auth failure.
@@ -173,7 +211,7 @@ final class AppModel: ObservableObject {
            let guest = CascadeClient(terminalLink: terminalLink, name: UIDevice.current.name) {
             client = guest
         } else {
-            let readOnly = discovered && listed?.joinHandle == nil
+            let readOnly = listed?.readOnly ?? (discovered && listed?.joinHandle == nil)
             let config = CascadeClient.Config(base: account.base, token: account.token,
                                               sessionId: sessionId, name: UIDevice.current.name,
                                               readOnly: readOnly, title: listed?.title ?? "")
@@ -183,10 +221,13 @@ final class AppModel: ObservableObject {
             }
         }
         client.justPaired = paired
+        // Seed title/cwd/relay/joinHandle from the rail row before push so
+        // EditorView never paints "new session" while the snapshot is in flight.
+        if let listed { client.adoptRow(listed) }
         active = client
-        client.connect()
         showEditor = ProcessInfo.processInfo.environment["CASCADE_SHOWCASE"] != "1"
         connectedId = sessionId
+        client.connect()
         if ProcessInfo.processInfo.environment["CASCADE_SCREENSHOT"] != "1" { Notifier.requestAuth() }
         notify.reset()
         cancellable = client.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in self?.onClientChanged() }
@@ -520,7 +561,7 @@ struct RootView: View {
                     // from the right; Leave / back-swipe pops it left.
                     .navigationDestination(isPresented: $app.showEditor) {
                         if let client = app.active {
-                            EditorView(client: client)
+                            EditorView(client: client, onHistoryTrigger: { app.loadHistoryPage() })
                                 .environmentObject(theme)
                                 .navigationBarBackButtonHidden(true)
                                 .toolbar {
@@ -557,7 +598,8 @@ struct RootView: View {
             guard !didAutoAttach, app.active == nil, app.account != nil else { return }
             didAutoAttach = true
             if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
-                if app.sessions.isEmpty { await app.refreshSessions() }
+                // Never await refresh before push — warm cache (or the listed
+                // row) already has the title; trailing adoptRow fills gaps.
                 _ = app.connect(sessionId: id)
             } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
                 _ = app.connect(sessionId: latest.id)

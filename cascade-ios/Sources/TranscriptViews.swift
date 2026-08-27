@@ -19,7 +19,6 @@ struct TurnRow: View {
     var body: some View {
         content
             .padding(.bottom, 14)
-            .transition(.opacity)
     }
 
     /// Long-press actions. Copy is always offered; Edit/Rewind only when the
