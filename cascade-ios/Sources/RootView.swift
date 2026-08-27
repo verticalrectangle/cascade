@@ -24,10 +24,18 @@ struct RootView: View {
                 LoginGate()
                     .environmentObject(app)
                     .environmentObject(theme)
-            } else {
                 SessionsView(query: $searchText)
                     .background(t.bg.ignoresSafeArea())
                     .searchable(text: $searchText, prompt: "Search sessions")
+                    .searchToolbarBehavior(.minimize)
+                    .overlay(alignment: .topLeading) {
+                        Text("DBG acct:\(app.account != nil ? "yes" : "no") sess:\(app.sessions.count)")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                            .padding(4)
+                            .background(Color.yellow.opacity(0.8))
+                            .allowsHitTesting(false)
+                    }
                     .searchToolbarBehavior(.minimize)
                     .toolbar {
                         ToolbarItem(placement: .topBarTrailing) {
