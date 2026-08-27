@@ -144,20 +144,18 @@ final class AppModel: ObservableObject {
         // still held the flag.
         if let inflight = refreshTask { await inflight.value; return }
         guard !refreshing, let account else { return }
-        let task = Task { await performRefresh() }
+        let task = Task { @MainActor in await performRefresh() }
         refreshTask = task
         await task.value
         refreshTask = nil
     }
 
     private func performRefresh() async {
-        print("[cache] performRefresh account=\(account != nil) sessions=\(sessions.count)")
         guard let account else { return }
         refreshing = true
         defer { refreshing = false }
         do {
             let metas = try await CascadeClient.listSessions(account: account)
-            print("[cache] fetched \(metas.count) metas")
             let machineNames: [String: String] = Dictionary(
                 uniqueKeysWithValues: ((try? await CascadeClient.listMachines(account: account)) ?? []).map { ($0.id, $0.name) })
             var next: [JoinedSession] = metas.map { m in
