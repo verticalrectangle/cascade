@@ -98,8 +98,14 @@ struct RootView: View {
             // leave → view re-appears → .task again).
             guard !didAutoAttach, app.active == nil, app.account != nil else { return }
             didAutoAttach = true
+            // Wait for the warm cache / refresh to populate sessions so the
+            // latest id can be resolved. Without this the attach races the
+            // cache and lands with no session (blank transcript).
+            for _ in 0..<20 {
+                if !app.sessions.isEmpty { break }
+                try? await Task.sleep(nanoseconds: 200_000_000)
+            }
             if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
-                // Never await refresh before push — warm cache (or the listed
                 // row) already has the title; trailing adoptRow fills gaps.
                 _ = app.connect(sessionId: id)
             } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {

@@ -294,10 +294,6 @@ struct EditorView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    Text("DBG turns:\(vm.turns.count) durable:\(durableTurns.count) hasMore:\(vm.historyHasMore) loading:\(vm.historyLoading) oldest:\(vm.live.historyOldestRendered)")
-                        .font(.caption2).foregroundStyle(.red).padding(4).background(Color.yellow.opacity(0.9))
-                    Button("LOAD HISTORY hasMore:\(vm.historyHasMore) loading:\(vm.historyLoading)") { vm.loadHistoryPage() }
-                        .font(.caption).padding(4).background(Color.orange).foregroundStyle(.black)
                     Color.clear
                         .frame(height: 1)
                         .background(
@@ -426,11 +422,6 @@ struct EditorView: View {
             }
             .animation(.easeInOut(duration: 0.15), value: showJumpPill)
             .environment(\.unpinFollow, unpinFollow)
-            .task {
-                try? await Task.sleep(nanoseconds: 3_000_000_000)
-                print("AUTO LOAD HISTORY hasMore=\(vm.historyHasMore) loading=\(vm.historyLoading)")
-                vm.loadHistoryPage()
-            }
         }
     }
 
