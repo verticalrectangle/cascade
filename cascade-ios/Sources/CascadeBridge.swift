@@ -887,10 +887,13 @@ final class CascadeClient: ObservableObject {
             if let st = frame["state"] as? [String: Any] {
                 absorbCollabState(st)
             }
-            if let ro = frame["readOnly"] as? Bool { readOnly = ro }
-            messages = []
+            // Do NOT clear `messages` here: full guests get a transcript
+            // replay immediately after welcome (the snapshot event replaces
+            // anyway), but prompt-channel guests get none — clearing left
+            // them with an empty transcript and a live cloud filter.
             streamText = ""; streamThinking = ""; streamDone = false
             activeTools = []; pendingRequest = nil
+            streamOpen = false
             phase = "live"
         }
         if t == "state", let st = frame["state"] as? [String: Any] {
