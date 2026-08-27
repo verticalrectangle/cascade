@@ -186,6 +186,9 @@ final class AppModel: ObservableObject {
         Task {
             await refreshSessions()
             await refreshShare(for: sessionId)
+            if ProcessInfo.processInfo.environment["CASCADE_DEBUG_FRAMES"] == "1" {
+                print("[frames] trailing refresh done sessions=\(sessions.count) hasRow=\(sessions.contains { $0.id == sessionId })")
+            }
             if let row = sessions.first(where: { $0.id == sessionId }) {
                 client.adoptRow(row)
             }
@@ -546,10 +549,12 @@ struct RootView: View {
             // Fire once per launch — a failed attach must not re-trigger on
             // every navigation pop (that looped: attach → welcome timeout →
             // leave → view re-appears → .task again).
+            let dbg = ProcessInfo.processInfo.environment["CASCADE_DEBUG_FRAMES"] == "1"
             guard !didAutoAttach, app.active == nil, app.account != nil else { return }
             didAutoAttach = true
             if let id = ProcessInfo.processInfo.environment["CASCADE_SESSION"] {
                 if app.sessions.isEmpty { await app.refreshSessions() }
+                if dbg { print("[frames] task post-refresh sessions=\(app.sessions.count) hasRow=\(app.sessions.contains { $0.id == id })") }
                 _ = app.connect(sessionId: id)
             } else if let latest = app.sessions.max(by: { $0.savedAt < $1.savedAt }) {
                 _ = app.connect(sessionId: latest.id)
