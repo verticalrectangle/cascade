@@ -165,7 +165,7 @@ final class AppModel: ObservableObject {
             let readOnly = discovered && listed?.joinHandle == nil
             let config = CascadeClient.Config(base: account.base, token: account.token,
                                               sessionId: sessionId, name: UIDevice.current.name,
-                                              readOnly: readOnly)
+                                              readOnly: readOnly, title: listed?.title ?? "")
             client = CascadeClient(config: config)
             if discovered, let handle = listed?.joinHandle, !handle.isEmpty {
                 client.attachPromptChannel(handle)

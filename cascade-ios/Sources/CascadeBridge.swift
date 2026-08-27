@@ -196,9 +196,10 @@ final class CascadeClient: ObservableObject {
         let name: String
         let readOnly: Bool
         let paged: Bool
+        let title: String
         /// Pre-set when attaching to an existing session (skips login+list).
-        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true) {
-            self.base = base; self.token = token; self.sessionId = sessionId; self.name = name
+        init(base: URL, token: String, sessionId: String, name: String, readOnly: Bool = false, paged: Bool = true, title: String = "") {
+            self.base = base; self.token = token; self.sessionId = sessionId; self.name = name; self.title = title
             self.readOnly = readOnly
             self.paged = paged
         }
@@ -499,7 +500,10 @@ final class CascadeClient: ObservableObject {
         relay = base.host ?? "—"
         if let port = base.port { relay += ":\(port)" }
         sessionId = targetId
-        title = "new session"
+        // GTK seeds the header from the sessions rail; the cloud snapshot and
+        // the prompt-only guest channel carry no title, so without this the
+        // editor header stays on the "new session" placeholder forever.
+        title = config.title.isEmpty ? "new session" : config.title
         cwd = "…"
         readOnly = config.readOnly
     }
