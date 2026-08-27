@@ -294,7 +294,7 @@ struct EditorView: View {
         ScrollViewReader { proxy in
             ScrollView {
                 LazyVStack(spacing: 0) {
-                    Text("DBG turns:\(vm.turns.count) durable:\(durableTurns.count) hasMore:\(vm.historyHasMore) loading:\(vm.historyLoading) oldest:\(vm.historyOldestRendered)")
+                    Text("DBG turns:\(vm.turns.count) durable:\(durableTurns.count) hasMore:\(vm.historyHasMore) loading:\(vm.historyLoading) oldest:\(vm.live.historyOldestRendered)")
                         .font(.caption2).foregroundStyle(.red).padding(4).background(Color.yellow.opacity(0.9))
                     Button("LOAD HISTORY hasMore:\(vm.historyHasMore) loading:\(vm.historyLoading)") { vm.loadHistoryPage() }
                         .font(.caption).padding(4).background(Color.orange).foregroundStyle(.black)
