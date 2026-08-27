@@ -72,7 +72,7 @@ struct EditorView: View {
             ShareSheet(items: [exportText])
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { vm.live.reconnectIfNeeded() }
+            if phase == .active { vm.live.resync() }
         }
         .overlay(alignment: .top) {
             if let toast {
