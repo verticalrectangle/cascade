@@ -300,14 +300,17 @@ private func truncate(_ s: String, _ n: Int) -> String {
 struct StreamFade: ViewModifier {
     let active: Bool
     let token: String
+    @State private var shown = false
     @ViewBuilder
     func body(content: Content) -> some View {
-        if active {
-            content
-                .transition(.opacity)
-                .animation(.easeIn(duration: TranscriptCaps.streamFade), value: token)
-        } else {
-            content
-        }
+        // Opacity-on-appear only. .transition(.opacity) inside a LazyVStack
+        // replays on cell recycle and sticks at 0 — transcript text vanished
+        // on scroll. Never transition a lazy cell.
+        content
+            .opacity(active && !shown ? 0.0 : 1.0)
+            .onAppear {
+                guard active, !shown else { return }
+                withAnimation(.easeIn(duration: TranscriptCaps.streamFade)) { shown = true }
+            }
     }
 }
