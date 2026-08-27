@@ -426,6 +426,11 @@ struct EditorView: View {
             }
             .animation(.easeInOut(duration: 0.15), value: showJumpPill)
             .environment(\.unpinFollow, unpinFollow)
+            .task {
+                try? await Task.sleep(nanoseconds: 3_000_000_000)
+                print("AUTO LOAD HISTORY hasMore=\(vm.historyHasMore) loading=\(vm.historyLoading)")
+                vm.loadHistoryPage()
+            }
         }
     }
 
