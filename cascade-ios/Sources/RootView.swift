@@ -115,6 +115,7 @@ final class AppModel: ObservableObject {
     }
 
     private func performRefresh() async {
+        guard let account else { return }
         refreshing = true
         defer { refreshing = false }
         do {
