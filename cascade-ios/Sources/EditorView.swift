@@ -23,6 +23,7 @@ private struct ScrollHeightKey: PreferenceKey {
 struct EditorView: View {
     @EnvironmentObject var theme: ThemeStore
     @Environment(\.scenePhase) private var scenePhase
+    @State private var seenActive = false
     @StateObject var vm: SessionVM
     @StateObject private var dictation = Dictation()
     @State private var draft = ""
@@ -72,7 +73,11 @@ struct EditorView: View {
             ShareSheet(items: [exportText])
         }
         .onChange(of: scenePhase) { _, phase in
-            if phase == .active { vm.live.resync() }
+            // Cold launch walks background→active too; connect() already
+            // opened the channels, so only resync on RETURN to foreground.
+            if phase == .active {
+                if seenActive { vm.live.resync() } else { seenActive = true }
+            }
         }
         .overlay(alignment: .top) {
             if let toast {
