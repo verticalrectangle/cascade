@@ -1180,6 +1180,7 @@ final class CascadeClient: ObservableObject {
         } else if let t = m["text"] as? String, !t.isEmpty {
             payload += "text\u{1f}" + t + "\u{1e}"
         }
+        return sha256Hex(payload)
     }
 
     private static func fingerprintPart(_ part: Any) -> String {
